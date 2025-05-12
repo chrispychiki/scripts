@@ -60,3 +60,7 @@ All scripts should:
 ## Code Interaction Guidelines
 
 - Prefer reading entire files and std outputs. When you grep/find small snippets of code to save on tokens, you end up getting extremely confused and wasting way more tokens overall. just read the whole file. please.
+
+## Code Commenting Guidelines
+
+- AVOID ALL COMMENTS: Keep code completely free of ANY new comments. NEVER add explanatory comments of any kind when writing new code or modifying existing code. Do not create section headers or separator comments. Absolutely no new comment blocks under any circumstances. Focus only on clean, self-documenting code.
