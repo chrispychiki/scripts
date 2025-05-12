@@ -35,8 +35,13 @@
 #
 # INTERACTIVE COMMANDS:
 #   [number]       Select a file or navigate into a directory
+#   [num1,num2,..] Select multiple files by comma-separated list
+#   [num1-num2]    Select a range of files (inclusive)
+#   *              Select all files in current directory
+#   **             Select all files recursively
 #   ..             Go up to the parent directory
-#   d              Done, finish selection and generate output
+#   /              Return to repository root
+#   [empty]        Press Enter with no input to finish selection and copy to clipboard
 #   l              List currently selected files
 #   q              Quit without generating output
 #   h              Show help for commands
@@ -87,11 +92,16 @@ print_usage() {
   echo ""
   echo "INTERACTIVE NAVIGATION COMMANDS:"
   echo "  [number]                 Select a file or navigate into a directory"
-  echo "  ..                       Go up to the parent directory"
-  echo "  d                        Done, finish selection and generate output"
-  echo "  l                        List currently selected files"
-  echo "  q                        Quit without generating output"
-  echo "  h                        Show help for commands"
+  echo "  [num1,num2,...]         Select multiple files by comma-separated list"
+  echo "  [num1-num2]             Select range of files (inclusive)"
+  echo "  *                       Select all files in current directory"
+  echo "  **                      Select all files recursively"
+  echo "  ..                      Go up to the parent directory"
+  echo "  /                       Return to repository root"
+  echo "  [empty]                  Press Enter with no input to finish selection and copy to clipboard"
+  echo "  l                       List currently selected files"
+  echo "  q                       Quit without generating output"
+  echo "  h                       Show help for commands"
   echo ""
   echo "FEATURES:"
   echo "  - Works with git repositories only (respects .gitignore)"
@@ -403,10 +413,11 @@ get_directory_contents() {
 echo "Starting interactive file selection..."
 echo "Quick Selection Guide:"
 echo "  - Enter number to select file or navigate into directory"
+echo "  - Enter '1,3,5' to select multiple files by index"
+echo "  - Enter '1-5' to select a range of files (inclusive)"
 echo "  - Use '*' to select all files in current directory"
 echo "  - Use '**' to select all files recursively"
-echo "  - Enter '1,3,5' to select multiple files by index"
-echo "  - Enter '1-5' to select a range of files"
+echo "  - Use '/' to return to repository root"
 SELECTED_FILES=()
 CURRENT_DIR="$GIT_ROOT"
 
@@ -469,12 +480,16 @@ show_files() {
   done
   
   echo "---------------------------------------------"
-  echo "Commands: [..] up, [/] root, [d] done, [l] list, [q] quit, [h] help"
+  echo "Commands: [..] up, [/] root, [Enter] finish & copy, [l] list, [q] quit, [h] help"
   echo "---------------------------------------------"
   
   read -p "> " selection
   
   case "$selection" in
+    ""|"done"|"d")
+      echo "Finishing selection with ${#SELECTED_FILES[@]} files..."
+      return 1
+      ;;
     "help"|"h"|"?")
       echo "Interactive Navigation Commands:"
       echo "  [number]                - Select a file or enter directory"
@@ -484,7 +499,7 @@ show_files() {
       echo "  **                     - Select all files in current directory and subdirectories"
       echo "  ..                     - Go up to parent directory"
       echo "  /                      - Return to repository root directory"
-      echo "  d                      - Done, finish selection and generate LLM-ready output"
+      echo "  [empty]                - Press Enter with no input to finish selection and copy to clipboard"
       echo "  l                      - List currently selected files"
       echo "  q                      - Quit without processing"
       echo "  h, ?                   - Show this help"
@@ -494,10 +509,6 @@ show_files() {
       echo "  • Only git-tracked files are shown (respects .gitignore)"
       echo "  • Hidden files and directories (starting with .) are excluded"
       echo "  • The output will follow directory structure for better LLM understanding"
-      ;;
-    "done"|"d")
-      echo "Finishing selection with ${#SELECTED_FILES[@]} files..."
-      return 1
       ;;
     "list"|"l"|"ls")
       echo "Currently selected files:"
