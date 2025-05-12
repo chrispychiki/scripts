@@ -62,13 +62,6 @@
 #   ./repo2llm.sh                     # Start in current directory
 #   ./repo2llm.sh ~/my-project -d     # Show and debug the output
 #
-# AUTHOR:
-#   Chris Kim
-#
-# REPOSITORY:
-#   This script is part of the scripts repository containing various
-#   development utilities. See /Users/chriskim/scripts/CLAUDE.md for
-#   more information about repository conventions and expectations.
 # =========================================================================
 
 REPO_PATH="."
