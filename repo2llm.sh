@@ -179,26 +179,35 @@ build_file_cache() {
     echo "DEBUG [build_file_cache]: Found $file_count files from git" >&2
   fi
 
-
   > "$FILE_CACHE_FILE"
 
+  # Process files in batches using xargs for parallel processing
   split -l 500 "$TEMP_FILE" "$TEMP_FILE.split."
-
+  
   for split_file in "$TEMP_FILE.split."*; do
-    while IFS= read -r file; do
-      if [[ -z "$file" ]]; then
-        continue
-      fi
-
-      local full_path="$GIT_ROOT/$file"
-      if [[ -f "$full_path" && ! -d "$full_path" ]]; then
-        local mod_time=$(stat $stat_opt "$stat_fmt" "$full_path" 2>/dev/null)
-        if [[ -n "$mod_time" ]]; then
-          echo "$file|$mod_time" >> "$FILE_CACHE_FILE"
+    if [[ -f "$split_file" ]]; then
+      # Use xargs to parallelize stat operations
+      cat "$split_file" | xargs -I{} -P 16 bash -c '
+        file="$1"
+        git_root="$2"
+        stat_opt="$3"
+        stat_fmt="$4"
+        
+        if [[ -z "$file" ]]; then
+          exit 0
         fi
-      fi
-    done < "$split_file"
-    rm "$split_file"
+        
+        full_path="$git_root/$file"
+        if [[ -f "$full_path" && ! -d "$full_path" ]]; then
+          mod_time=$(stat $stat_opt "$stat_fmt" "$full_path" 2>/dev/null)
+          if [[ -n "$mod_time" ]]; then
+            echo "$file|$mod_time"
+          fi
+        fi
+      ' -- {} "$GIT_ROOT" "$stat_opt" "$stat_fmt" >> "$FILE_CACHE_FILE"
+      
+      rm "$split_file"
+    fi
   done
 
   if [[ "$DEBUG_MODE" -eq 1 ]]; then
