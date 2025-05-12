@@ -17,13 +17,11 @@
 #   - Directory previews showing recently modified files
 #   - Logical directory structure in the output for better context
 #   - Handles file content formatting with proper delimiters
-#   - Automatically excludes binary files
 #   - Clipboard integration for direct pasting into LLM interfaces
 #   - Cross-platform support for macOS and Linux
 #
 # DEPENDENCIES:
 #   - git: For repository detection and file listing
-#   - file: For binary file detection
 #   - pbcopy (macOS) or xclip (Linux): For clipboard operations
 #     Note: If neither is available, output is saved to a temporary file
 #   - Standard Unix utilities: grep, sort, stat, etc.
@@ -68,7 +66,6 @@
 #   more information about repository conventions and expectations.
 # =========================================================================
 
-# Parse command line arguments
 REPO_PATH="."
 DEBUG_MODE=0
 
@@ -135,37 +132,27 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Navigate to repository
 cd "$REPO_PATH" || { echo "Error: Cannot access repository path"; exit 1; }
 
-# Check if this is a git repository
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
   echo "Error: Not a git repository. This script only works in git repositories."
   exit 1
 fi
 
-# Get the git root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
 
-# Create temporary files
 TEMP_FILE=$(mktemp)
 LIST_FILE=$(mktemp)
 ORDER_FILE=$(mktemp)
 trap 'rm -f "$TEMP_FILE" "$LIST_FILE" "$ORDER_FILE"' EXIT
 
-# Function to detect binary file
-is_binary() {
-  file --mime "$1" | grep -q "charset=binary"
-}
-
-# Efficient cache to store file paths and modification times
-# Format: path1|modtime1\npath2|modtime2\n...
-FILE_CACHE=""
-DIR_MOD_TIME_CACHE=""
+# Cache for file paths and modification times
+FILE_CACHE_FILE=$(mktemp)
+DIR_MOD_TIME_CACHE_FILE=$(mktemp)
+trap 'rm -f "$TEMP_FILE" "$LIST_FILE" "$ORDER_FILE" "$FILE_CACHE_FILE" "$DIR_MOD_TIME_CACHE_FILE" /tmp/tmp.*' EXIT
 
 # Build file modification time cache
 build_file_cache() {
-  # Platform-specific stat command
   local stat_fmt="%Y"
   local stat_opt="-c"
   if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -178,36 +165,37 @@ build_file_cache() {
     echo "DEBUG [build_file_cache]: Building file cache..." >&2
   fi
 
-  # Get the list of files and ensure we properly grep out hidden files
-  local files=$(git -C "$GIT_ROOT" ls-files | grep -v "^\." | grep -v "/\.")
-  local file_count=$(echo "$files" | wc -l)
+  git -C "$GIT_ROOT" ls-files | grep -v "^\." | grep -v "/\." > "$TEMP_FILE"
+  local file_count=$(wc -l < "$TEMP_FILE")
 
   if [[ "$DEBUG_MODE" -eq 1 ]]; then
     echo "DEBUG [build_file_cache]: Found $file_count files from git" >&2
   fi
 
-  while IFS= read -r file; do
-    if [[ -z "$file" ]]; then
-      continue  # Skip empty lines
-    fi
+  > "$FILE_CACHE_FILE"
 
-    if [[ "$file" =~ /\.|^\. ]]; then
-      continue  # Skip hidden files (double-check)
-    fi
+  # Process in smaller batches to avoid command line length issues
+  split -l 500 "$TEMP_FILE" "$TEMP_FILE.split."
 
-    local full_path="$GIT_ROOT/$file"
-    if [[ -f "$full_path" && ! -d "$full_path" ]] && ! is_binary "$full_path"; then
-      # Get file modification time
-      local mod_time=$(stat $stat_opt "$stat_fmt" "$full_path" 2>/dev/null)
-      if [[ -n "$mod_time" ]]; then
-        # Add to cache
-        FILE_CACHE+="$file|$mod_time\n"
+  for split_file in "$TEMP_FILE.split."*; do
+    while IFS= read -r file; do
+      if [[ -z "$file" ]]; then
+        continue
       fi
-    fi
-  done < <(echo "$files")
+
+      local full_path="$GIT_ROOT/$file"
+      if [[ -f "$full_path" && ! -d "$full_path" ]]; then
+        local mod_time=$(stat $stat_opt "$stat_fmt" "$full_path" 2>/dev/null)
+        if [[ -n "$mod_time" ]]; then
+          echo "$file|$mod_time" >> "$FILE_CACHE_FILE"
+        fi
+      fi
+    done < "$split_file"
+    rm "$split_file"
+  done
 
   if [[ "$DEBUG_MODE" -eq 1 ]]; then
-    local cache_count=$(echo -e "$FILE_CACHE" | wc -l)
+    local cache_count=$(wc -l < "$FILE_CACHE_FILE")
     echo "DEBUG [build_file_cache]: Added $cache_count files to cache" >&2
   fi
 }
@@ -217,40 +205,38 @@ build_dir_mod_time_cache() {
   if [[ "$DEBUG_MODE" -eq 1 ]]; then
     echo "DEBUG [build_dir_mod_time_cache]: Building directory modification time cache..." >&2
   fi
-  
-  # Get unique directories from file paths
-  local dirs=()
-  local dir=""
-  
-  while read -r line; do
-    local file_path="${line%%|*}"
-    if [[ "$file_path" == */* ]]; then
-      dir=$(dirname "$file_path")
-      
-      # Add all parent directories
-      local curr_dir="$dir"
-      while [[ -n "$curr_dir" && "$curr_dir" != "." ]]; do
-        if [[ ! " ${dirs[*]} " =~ " $curr_dir " ]]; then
-          dirs+=("$curr_dir")
-        fi
-        curr_dir=$(dirname "$curr_dir")
-      done
-    fi
-  done < <(echo -e "$FILE_CACHE")
-  
-  # Calculate the modification time for each directory (max of contained files)
-  for dir in "${dirs[@]}"; do
-    local pattern="^$dir/"
-    local matches=$(echo -e "$FILE_CACHE" | grep "$pattern")
-    local max_time=$(echo "$matches" | cut -d'|' -f2 | sort -nr | head -n1)
-    
-    if [[ -n "$max_time" ]]; then
-      DIR_MOD_TIME_CACHE+="$dir|$max_time\n"
-    fi
-  done
-  
+
+  awk -F'|' '
+    BEGIN { OFS="|" }
+    $1 ~ /\// {
+      # Process each file path component
+      parts = split($1, path_parts, "/")
+      time = $2
+
+      # Build paths incrementally
+      curr_path = ""
+      for (i=1; i < parts; i++) {
+        if (curr_path == "") {
+          curr_path = path_parts[i]
+        } else {
+          curr_path = curr_path "/" path_parts[i]
+        }
+
+        # Update directory with max time
+        if (!(curr_path in dirs) || time > dirs[curr_path]) {
+          dirs[curr_path] = time
+        }
+      }
+    }
+    END {
+      for (dir in dirs) {
+        print dir, dirs[dir]
+      }
+    }
+  ' "$FILE_CACHE_FILE" > "$DIR_MOD_TIME_CACHE_FILE"
+
   if [[ "$DEBUG_MODE" -eq 1 ]]; then
-    local cache_count=$(echo -e "$DIR_MOD_TIME_CACHE" | wc -l)
+    local cache_count=$(wc -l < "$DIR_MOD_TIME_CACHE_FILE")
     echo "DEBUG [build_dir_mod_time_cache]: Added $cache_count directories to cache" >&2
   fi
 }
@@ -258,27 +244,24 @@ build_dir_mod_time_cache() {
 # Get modification time for a file from cache
 get_file_mod_time() {
   local file_path="$1"
-  echo -e "$FILE_CACHE" | grep "^$file_path|" | cut -d'|' -f2
+  grep "^$file_path|" "$FILE_CACHE_FILE" | cut -d'|' -f2
 }
 
 # Get directory modification time from cache
 get_dir_mod_time() {
   local dir_path="$1"
-  
-  # Try getting from cache first
-  local cached_time=$(echo -e "$DIR_MOD_TIME_CACHE" | grep "^$dir_path|" | cut -d'|' -f2)
-  
+
+  local cached_time=$(grep "^$dir_path|" "$DIR_MOD_TIME_CACHE_FILE" | cut -d'|' -f2)
+
   if [[ -n "$cached_time" ]]; then
     echo "$cached_time"
     return
   fi
-  
-  # If not in cache, calculate it
+
   local pattern="^$dir_path/"
-  local matches=$(echo -e "$FILE_CACHE" | grep "$pattern")
+  local matches=$(grep "$pattern" "$FILE_CACHE_FILE")
   local max_time=$(echo "$matches" | cut -d'|' -f2 | sort -nr | head -n1)
-  
-  # Fall back to directory's own time if no files found
+
   if [[ -z "$max_time" ]]; then
     local stat_fmt="%Y"
     local stat_opt="-c"
@@ -288,121 +271,80 @@ get_dir_mod_time() {
     fi
     max_time=$(stat $stat_opt "$stat_fmt" "$GIT_ROOT/$dir_path" 2>/dev/null)
   fi
-  
-  # Add to cache for future use
-  DIR_MOD_TIME_CACHE+="$dir_path|$max_time\n"
-  
+
+  echo "$dir_path|$max_time" >> "$DIR_MOD_TIME_CACHE_FILE"
+
   echo "$max_time"
 }
 
-# Get a list of all items (files and directories) in a path - optimized version
+# Get a list of all items (files and directories) in a path
 get_all_items() {
   local current_dir="$1"
   local rel_path
-  local items_with_times=""
+  local items_temp_file=$(mktemp)
 
-  # Get relative path from git root
   if [[ "$current_dir" == "$GIT_ROOT" ]]; then
     rel_path=""
   else
     rel_path="${current_dir#$GIT_ROOT/}"
   fi
 
-  # Filter pattern construction - much faster than multiple string operations in a loop
-  local pattern
   if [[ -z "$rel_path" ]]; then
-    # For root directory, we want only files without slashes
-    pattern="^[^/]*$"
+    grep -E "^[^/]+\|" "$FILE_CACHE_FILE" |
+      awk -F'|' '{print $2 "|f|" $1}' >> "$items_temp_file"
   else
-    # For subdirectories, match files in that exact directory level
-    pattern="^$rel_path/[^/]*$"
+    grep -E "^$rel_path/[^/]+\|" "$FILE_CACHE_FILE" |
+      awk -F'|' -v path="$rel_path/" '{sub(path, "", $1); print $2 "|f|" $1}' >> "$items_temp_file"
   fi
 
-  # Process files in this directory - use grep to pre-filter candidates
-  # This dramatically reduces the number of iterations needed
-  local matching_files=$(echo -e "$FILE_CACHE" | grep -E "$pattern")
+  local dir_list_file=$(mktemp)
 
-  while read -r line; do
-    if [[ -z "$line" ]]; then
-      continue  # Skip empty lines
-    fi
+  if [[ -z "$rel_path" ]]; then
+    grep -E "/" "$FILE_CACHE_FILE" | cut -d'|' -f1 | cut -d'/' -f1 | grep -v "^\." | grep -v "^node_modules$" | grep -v "^.git$" | sort | uniq > "$dir_list_file"
+  else
+    grep -E "^$rel_path/" "$FILE_CACHE_FILE" |
+      awk -F'|' -v path="$rel_path/" '{
+        sub(path, "", $1);
+        if (index($1, "/") > 0) {
+          dir = substr($1, 1, index($1, "/")-1);
+          if (dir != "." && dir != ".git" && dir != "node_modules" && dir !~ /^\./)
+            print dir
+        }
+      }' | sort | uniq > "$dir_list_file"
+  fi
 
-    local file_path="${line%%|*}"
-    local mod_time="${line##*|}"
-
-    # For root directory items
-    if [[ -z "$rel_path" ]]; then
-      items_with_times+="$mod_time|f|$file_path\n"
-    # For subdirectory items
-    else
-      local rel_file="${file_path#$rel_path/}"
-      items_with_times+="$mod_time|f|$rel_file\n"
-    fi
-  done < <(echo "$matching_files")
-  
-  # Build a list of direct subdirectories more efficiently
-  local subdirs=()
-  local seen_dirs=""
-
-  while read -r line; do
-    if [[ -z "$line" ]]; then
-      continue  # Skip empty lines
-    fi
-
-    local file_path="${line%%|*}"
-
-    # Extract subdirectory based on current path
-    if [[ -z "$rel_path" ]]; then
-      # Root directory - get first level directories
-      if [[ "$file_path" == */* ]]; then
-        local dir="${file_path%%/*}"
-        # Faster check with direct string match
-        if [[ "$seen_dirs" != *"|$dir|"* ]]; then
-          subdirs+=("$dir")
-          seen_dirs+="|$dir|"
-        fi
-      fi
-    elif [[ "$file_path" == "$rel_path/"* ]]; then
-      # Subdirectory - extract next level directories
-      local rel_file="${file_path#$rel_path/}"
-      if [[ "$rel_file" == */* ]]; then
-        local dir="${rel_file%%/*}"
-        # Faster check with direct string match
-        if [[ "$seen_dirs" != *"|$dir|"* ]]; then
-          subdirs+=("$dir")
-          seen_dirs+="|$dir|"
-        fi
-      fi
-    fi
-  done < <(echo -e "$FILE_CACHE")
-  
-  # Add directories with their modification times
-  for dir in "${subdirs[@]}"; do
-    # Skip hidden directories
-    if [[ "$dir" =~ ^\. || "$dir" == "node_modules" || "$dir" == ".git" ]]; then
+  while read -r dir; do
+    if [[ -z "$dir" ]]; then
       continue
     fi
-    
+
     local dir_path_full
     if [[ -z "$rel_path" ]]; then
       dir_path_full="$dir"
     else
       dir_path_full="$rel_path/$dir"
     fi
-    
-    local mod_time=$(get_dir_mod_time "$dir_path_full")
-    if [[ -n "$mod_time" ]]; then
-      items_with_times+="$mod_time|d|$dir/\n"
+
+    local mod_time=$(grep -E "^$dir_path_full\|" "$DIR_MOD_TIME_CACHE_FILE" | cut -d'|' -f2)
+    if [[ -z "$mod_time" ]]; then
+      mod_time=$(get_dir_mod_time "$dir_path_full")
     fi
-  done
-  
-  # Return all items sorted by modification time (newest first)
-  if [[ -n "$items_with_times" ]]; then
-    echo -e "$items_with_times" | sort -t'|' -k1,1nr
+
+    if [[ -n "$mod_time" ]]; then
+      echo "$mod_time|d|$dir/" >> "$items_temp_file"
+    fi
+  done < "$dir_list_file"
+
+  rm "$dir_list_file"
+
+  if [[ -s "$items_temp_file" ]]; then
+    sort -t'|' -k1,1nr "$items_temp_file"
   fi
+
+  rm "$items_temp_file"
 }
 
-# Get preview of a directory (up to 3 most recent items) - fixed for proper display
+# Get preview of a directory (up to 3 most recent items)
 get_directory_preview() {
   local dir_path="$1"
   local max_items="$2"
@@ -411,43 +353,37 @@ get_directory_preview() {
   # Get all items in this directory, sorted by recency
   local all_items=$(get_all_items "$full_path")
 
-  # Process and store items in a temporary file for reliable output
-  local temp_file=$(mktemp)
-  if [[ -n "$all_items" ]]; then
-    # Get first max_items entries only
-    local count=0
-    while IFS='|' read -r time type name; do
-      if [[ "$type" == "d" ]]; then
-        echo "📁 $name" >> "$temp_file"
-      else
-        echo "📄 $name" >> "$temp_file"
-      fi
-
-      ((count++))
-      if [[ $count -eq $max_items ]]; then
-        break
-      fi
-    done < <(echo -e "$all_items")
-  fi
-
-  if [[ ! -s "$temp_file" ]]; then
-    rm "$temp_file"
+  # Process and return items directly
+  if [[ -z "$all_items" ]]; then
     echo "(Empty directory)"
-  else
-    # Read the file line by line and format output
-    cat "$temp_file"
-    rm "$temp_file"
+    return
   fi
+
+  local result=""
+  local count=0
+
+  while IFS='|' read -r time type name; do
+    if [[ "$type" == "d" ]]; then
+      result+="📁 $name\n"
+    else
+      result+="📄 $name\n"
+    fi
+
+    ((count++))
+    if [[ $count -eq $max_items ]]; then
+      break
+    fi
+  done < <(echo "$all_items")
+
+  echo -e "$result"
 }
 
 # Get contents of current directory
 get_directory_contents() {
   local current_dir="$1"
   
-  # Get all items with mod times, sorted by recency
   local sorted_items=$(get_all_items "$current_dir")
   
-  # Parse items into arrays
   ITEMS=()
   ITEM_TYPES=()
   MOD_TIMES=()
@@ -467,7 +403,6 @@ get_directory_contents() {
       ITEM_TYPES+=("$type")
       MOD_TIMES+=("$mod_time")
       
-      # Get previews for directories
       if [[ "$type" == "d" ]]; then
         local dir_path
         if [[ "$current_dir" == "$GIT_ROOT" ]]; then
@@ -479,7 +414,7 @@ get_directory_contents() {
         local preview=$(get_directory_preview "$dir_path" 3)
         PREVIEWS+=("$preview")
       else
-        PREVIEWS+=("")  # Empty preview for files
+        PREVIEWS+=("")
       fi
     done < <(echo "$sorted_items")
   fi
@@ -491,13 +426,11 @@ echo "Enter number to select file or navigate to directory."
 SELECTED_FILES=()
 CURRENT_DIR="$GIT_ROOT"
 
-# Global arrays for directory contents
 ITEMS=()
 ITEM_TYPES=()
 MOD_TIMES=()
 PREVIEWS=()
 
-# Initialize file cache
 build_file_cache
 build_dir_mod_time_cache
 
@@ -506,18 +439,14 @@ show_files() {
   local current_dir="$1"
   local items_index=()
   
-  # Change to the directory
   cd "$current_dir" || return
   
-  # Display current location and selection info
   echo "Directory: $current_dir"
   echo "Selected: ${#SELECTED_FILES[@]} files"
   echo "---------------------------------------------"
   
-  # Get all items in this directory, already sorted by modification time
   get_directory_contents "$current_dir"
   
-  # Display items
   local idx=0
   local item_count=0
   local max_previews=3
@@ -528,22 +457,14 @@ show_files() {
     local preview="${PREVIEWS[$i]}"
     local show_preview=0
 
-    # Determine if this item should get a preview (only first 3 items that are directories)
     if [[ "$type" == "d" && $item_count -lt $max_previews ]]; then
       show_preview=1
     fi
 
-    # Display item with index
     if [[ "$type" == "d" ]]; then
       echo "[$idx] 📁 $item"
 
-      # Only show previews for the first 3 items in the overall listing
       if [[ $show_preview -eq 1 && "$preview" != "(Empty directory)" ]]; then
-        # Create a temporary file and read line by line for proper formatting
-        local temp_file=$(mktemp)
-        echo "$preview" > "$temp_file"
-
-        # Read line by line with correct formatting
         local line_num=0
         while IFS= read -r line; do
           if [[ $line_num -eq 0 ]]; then
@@ -552,31 +473,24 @@ show_files() {
             echo "       $line"
           fi
           ((line_num++))
-        done < "$temp_file"
-
-        rm "$temp_file"
+        done < <(echo -e "$preview")
       fi
     else
       echo "[$idx] 📄 $item"
     fi
 
-    # Increment item counter regardless of type
     ((item_count++))
-    
-    # Keep track of original index for selection
+
     items_index[$idx]="$type:$item"
     ((idx++))
   done
   
-  # Show command prompt
   echo "---------------------------------------------"
   echo "Commands: [..] up, [d] done, [l] list, [q] quit, [h] help"
   echo "---------------------------------------------"
   
-  # Get user input
   read -p "> " selection
   
-  # Process selection
   case "$selection" in
     "help"|"h"|"?")
       echo "Interactive Navigation Commands:"
@@ -591,7 +505,6 @@ show_files() {
       echo "  • Files and directories are sorted by modification time (most recent first)"
       echo "  • Only git-tracked files are shown (respects .gitignore)"
       echo "  • Hidden files and directories (starting with .) are excluded"
-      echo "  • Binary files are automatically filtered out"
       echo "  • The output will follow directory structure for better LLM understanding"
       ;;
     "done"|"d")
@@ -609,7 +522,6 @@ show_files() {
       exit 0
       ;;
     "..")
-      # Go up one directory level
       if [[ "$CURRENT_DIR" != "$GIT_ROOT" ]]; then
         CURRENT_DIR="$(dirname "$CURRENT_DIR")"
       else
@@ -617,17 +529,14 @@ show_files() {
       fi
       ;;
     *)
-      # Check if input is a number within range
       if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -lt "$idx" ]; then
         local item="${items_index[$selection]}"
         local type="${item%%:*}"
         local name="${item#*:}"
         
         if [ "$type" == "d" ]; then
-          # Navigate into directory (remove trailing slash)
           CURRENT_DIR="$CURRENT_DIR/${name%/}"
         elif [ "$type" == "f" ]; then
-          # Add file to selection if not already selected
           local full_path="$CURRENT_DIR/$name"
           if [[ ! -f "$full_path" ]]; then
             echo "Warning: File not found at path: $full_path"
@@ -647,7 +556,6 @@ show_files() {
   return 0
 }
 
-# Main loop for file selection
 while true; do
   show_files "$CURRENT_DIR"
   if [ $? -eq 1 ]; then
@@ -655,7 +563,6 @@ while true; do
   fi
 done
 
-# Check if any files were selected
 if [ ${#SELECTED_FILES[@]} -eq 0 ]; then
   echo "No files were selected, nothing to copy."
   exit 0
@@ -663,52 +570,40 @@ fi
 
 echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
 
-# Build output into temporary file
 {
-  # Repository header - use git root name for consistency
   REPO_BASENAME=$(basename "$GIT_ROOT")
   echo "# Repository: $REPO_BASENAME ($GIT_ROOT)"
   echo "# Files: ${#SELECTED_FILES[@]}"
   echo ""
   
-  # Directory Structure visualization
   echo "## Directory Structure"
   echo '```'
   echo "$GIT_ROOT"
   
-  # Clear the file list and fill it with selected files for the directory tree
   > "$LIST_FILE"
   
-  # Collect file paths for SELECTED files only, relative to git root
   for FILE in "${SELECTED_FILES[@]}"; do
     REL_PATH="${FILE#"$GIT_ROOT/"}"
     echo "$REL_PATH" >> "$LIST_FILE"
   done
   
-  # Sort file paths by directory structure for a logical tree view
   sort -V "$LIST_FILE" > "${LIST_FILE}.tree"
   mv "${LIST_FILE}.tree" "$LIST_FILE"
   
-  # Store the ordered list for file content generation
   cp "$LIST_FILE" "$ORDER_FILE"
   
-  # Build tree structure
   PREV_PARTS=()
   while IFS= read -r FILE_PATH; do
     if [[ "$FILE_PATH" != *"/"* ]]; then
-      # Root file
       echo "+-- $FILE_PATH"
       continue
     fi
     
-    # Split path into components
     DIR_PATH=$(dirname "$FILE_PATH")
     FILENAME=$(basename "$FILE_PATH")
     
-    # Split directory into parts
     IFS='/' read -ra CURR_PARTS <<< "$DIR_PATH"
     
-    # Find the common prefix length
     COMMON_PREFIX_LEN=0
     for ((i=0; i<${#PREV_PARTS[@]} && i<${#CURR_PARTS[@]}; i++)); do
       if [[ "${PREV_PARTS[i]}" == "${CURR_PARTS[i]}" ]]; then
@@ -718,7 +613,6 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
       fi
     done
     
-    # Print new directory parts
     for ((i=COMMON_PREFIX_LEN; i<${#CURR_PARTS[@]}; i++)); do
       INDENT=$(printf '|   %.0s' $(seq 1 $i))
       if [[ $i -eq 0 ]]; then
@@ -728,18 +622,15 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
       fi
     done
     
-    # Print the file
     INDENT=$(printf '|   %.0s' $(seq 1 ${#CURR_PARTS[@]}))
     echo "$INDENT+-- $FILENAME"
     
-    # Save current path parts for next iteration
     PREV_PARTS=("${CURR_PARTS[@]}")
   done < "$LIST_FILE"
   
   echo '```'
   echo ""
   
-  # Add file contents in the same order as the directory tree
   while IFS= read -r REL_PATH; do
     FILE="$GIT_ROOT/$REL_PATH"
     if [[ ! -f "$FILE" ]]; then
@@ -747,16 +638,11 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
       continue
     fi
     
-    # Skip binary files and handle missing files
     if [[ ! -f "$FILE" ]]; then
       echo "Warning: File not found or was removed: $FILE" >&2
       continue
-    elif is_binary "$FILE"; then
-      echo "Warning: Skipping binary file: $FILE" >&2
-      continue
     fi
     
-    # Add file header and content with visible separator
     echo -e "\n\n"
     echo -e "###############################################################"
     echo -e "# FILE: $FILE"
@@ -764,7 +650,6 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
     echo -e "\n<file-contents>"
     cat "$FILE"
     
-    # Add newline if the file doesn't end with one
     if [ "$(tail -c1 "$FILE" | wc -l)" -eq 0 ]; then
       echo ""
     fi
@@ -772,7 +657,6 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
   done < "$ORDER_FILE"
 } > "$TEMP_FILE"
 
-# Copy to clipboard
 CLIPBOARD_SUCCESS=0
 if command -v pbcopy &> /dev/null; then
   if cat "$TEMP_FILE" | pbcopy; then
@@ -788,17 +672,14 @@ if [ $CLIPBOARD_SUCCESS -eq 1 ]; then
   echo "Repository files copied to clipboard successfully!"
 else
   echo "Unable to copy to clipboard. Output saved to: $TEMP_FILE"
-  # Release file from trap so it doesn't get deleted
   trap - EXIT
 fi
 
-# Debug output
 if [ $DEBUG_MODE -eq 1 ]; then
   echo "=== DEBUG: OUTPUT CONTENTS ==="
   cat "$TEMP_FILE"
   echo "=== END DEBUG OUTPUT ==="
 fi
 
-# Done - just output one completion message
 echo "Done! Repository files copied to clipboard for LLM chat."
 exit 0
