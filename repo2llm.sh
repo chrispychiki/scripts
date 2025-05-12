@@ -13,7 +13,7 @@
 # FEATURES:
 #   - Works exclusively with git repositories (respects .gitignore patterns)
 #   - Excludes hidden files and directories (starting with .)
-#   - Interactive navigation with files sorted by modification time (most recent first)
+#   - Interactive navigation with files and folders sorted by modification time (most recent first)
 #   - Directory previews showing recently modified files
 #   - Logical directory structure in the output for better context
 #   - Handles file content formatting with proper delimiters
@@ -99,7 +99,7 @@ print_usage() {
   echo "FEATURES:"
   echo "  - Works with git repositories only (respects .gitignore)"
   echo "  - Excludes hidden files and directories (starting with .)"
-  echo "  - Interactive directory navigation with files sorted by recency"
+  echo "  - Interactive directory navigation with files and folders sorted by recency"
   echo "  - Creates a structured output with file count, directory tree, and contents"
   echo "  - Copies the formatted output to the clipboard"
   echo ""
@@ -158,331 +158,414 @@ is_binary() {
   file --mime "$1" | grep -q "charset=binary"
 }
 
-# Function to list files and directories in the current path sorted by modification time
-list_files_and_dirs() {
-  local current_dir="$1"
-  local dirs=()
-  local files=()
-  local dir_mod_times=()
-  local file_mod_times=()
-  local dir_previews=()
+# Efficient cache to store file paths and modification times
+# Format: path1|modtime1\npath2|modtime2\n...
+FILE_CACHE=""
+DIR_MOD_TIME_CACHE=""
 
-  # Get the relative path from the git root
-  local rel_path
-  if [[ "$current_dir" == "$GIT_ROOT" ]]; then
-    rel_path=""
-  else
-    rel_path="${current_dir#$GIT_ROOT/}/"
+# Build file modification time cache
+build_file_cache() {
+  # Platform-specific stat command
+  local stat_fmt="%Y"
+  local stat_opt="-c"
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    stat_fmt="%m"
+    stat_opt="-f"
   fi
 
-  # List all directories that exist physically at this level
-  # with their modification times for sorting
-  for d in "$current_dir"/*; do
-    if [[ -d "$d" && ! "$(basename "$d")" =~ ^\. &&
-          "$(basename "$d")" != "node_modules" &&
-          "$(basename "$d")" != ".git" ]]; then
-      local dir_name="$(basename "$d")"
-      # Get the last modification time of the directory
-      local mod_time=$(stat -f "%m" "$d" 2>/dev/null || stat -c "%Y" "$d" 2>/dev/null)
+  # Get all git-tracked files (excluding hidden files) with a single command
+  if [[ "$DEBUG_MODE" -eq 1 ]]; then
+    echo "DEBUG [build_file_cache]: Building file cache..." >&2
+  fi
+
+  # Get the list of files and ensure we properly grep out hidden files
+  local files=$(git -C "$GIT_ROOT" ls-files | grep -v "^\." | grep -v "/\.")
+  local file_count=$(echo "$files" | wc -l)
+
+  if [[ "$DEBUG_MODE" -eq 1 ]]; then
+    echo "DEBUG [build_file_cache]: Found $file_count files from git" >&2
+  fi
+
+  while IFS= read -r file; do
+    if [[ -z "$file" ]]; then
+      continue  # Skip empty lines
+    fi
+
+    if [[ "$file" =~ /\.|^\. ]]; then
+      continue  # Skip hidden files (double-check)
+    fi
+
+    local full_path="$GIT_ROOT/$file"
+    if [[ -f "$full_path" && ! -d "$full_path" ]] && ! is_binary "$full_path"; then
+      # Get file modification time
+      local mod_time=$(stat $stat_opt "$stat_fmt" "$full_path" 2>/dev/null)
       if [[ -n "$mod_time" ]]; then
-        # Generate a preview of directory contents (most recently modified files)
-        # respecting .gitignore
-        # Setup stat format based on platform
-        local stat_fmt="%Y"
-        local stat_opt="-c"
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-          stat_fmt="%m"
-          stat_opt="-f"
-        fi
-
-        # Get dir path relative to git root for git ls-files
-        local dir_rel_path
-        if [[ "$d" == "$GIT_ROOT" ]]; then
-          dir_rel_path=""
-        else
-          dir_rel_path="${d#$GIT_ROOT/}"
-        fi
-
-        # Get the 3 most recently modified git-tracked files in this directory
-        local preview=""
-
-        # Create a temporary file for collecting files with modification times
-        local tmp_preview_file=$(mktemp)
-
-        # Get list of files directly in this directory (not subdirectories)
-        if [[ -z "$dir_rel_path" ]]; then
-          # Root directory - no path prefix
-          git -C "$GIT_ROOT" ls-files | grep -v "^\." | grep -v "/\." | grep -v "/" > "$tmp_preview_file"
-        else
-          # Subdirectory - filter files directly in this directory
-          git -C "$GIT_ROOT" ls-files "$dir_rel_path/" | grep -v "^\." | grep -v "/\." |
-          grep "^$dir_rel_path/[^/]*$" | sed "s|^$dir_rel_path/||" > "$tmp_preview_file"
-        fi
-
-        # Get the most recently modified files
-        if [[ -s "$tmp_preview_file" ]]; then
-          # Get full paths and modification times
-          preview=$(
-            while read -r file; do
-              if [[ -z "$dir_rel_path" ]]; then
-                # Root directory
-                full_path="$GIT_ROOT/$file"
-              else
-                # Subdirectory
-                full_path="$GIT_ROOT/$dir_rel_path/$file"
-              fi
-
-              if [[ -f "$full_path" && ! -d "$full_path" ]]; then
-                mod_time=$(stat $stat_opt "$stat_fmt" "$full_path" 2>/dev/null)
-                [[ -n "$mod_time" ]] && echo "$mod_time $file"
-              fi
-            done < "$tmp_preview_file" |
-            sort -rn | head -n 3 | cut -d' ' -f2- | sed 's/^/• /'
-          )
-        fi
-
-        # Clean up temporary file
-        rm -f "$tmp_preview_file"
-        dirs+=("$dir_name")
-        dir_mod_times+=("$mod_time:$dir_name")
-        dir_previews+=("$preview")
+        # Add to cache
+        FILE_CACHE+="$file|$mod_time\n"
       fi
+    fi
+  done < <(echo "$files")
+
+  if [[ "$DEBUG_MODE" -eq 1 ]]; then
+    local cache_count=$(echo -e "$FILE_CACHE" | wc -l)
+    echo "DEBUG [build_file_cache]: Added $cache_count files to cache" >&2
+  fi
+}
+
+# Build directory modification time cache
+build_dir_mod_time_cache() {
+  if [[ "$DEBUG_MODE" -eq 1 ]]; then
+    echo "DEBUG [build_dir_mod_time_cache]: Building directory modification time cache..." >&2
+  fi
+  
+  # Get unique directories from file paths
+  local dirs=()
+  local dir=""
+  
+  while read -r line; do
+    local file_path="${line%%|*}"
+    if [[ "$file_path" == */* ]]; then
+      dir=$(dirname "$file_path")
+      
+      # Add all parent directories
+      local curr_dir="$dir"
+      while [[ -n "$curr_dir" && "$curr_dir" != "." ]]; do
+        if [[ ! " ${dirs[*]} " =~ " $curr_dir " ]]; then
+          dirs+=("$curr_dir")
+        fi
+        curr_dir=$(dirname "$curr_dir")
+      done
+    fi
+  done < <(echo -e "$FILE_CACHE")
+  
+  # Calculate the modification time for each directory (max of contained files)
+  for dir in "${dirs[@]}"; do
+    local pattern="^$dir/"
+    local matches=$(echo -e "$FILE_CACHE" | grep "$pattern")
+    local max_time=$(echo "$matches" | cut -d'|' -f2 | sort -nr | head -n1)
+    
+    if [[ -n "$max_time" ]]; then
+      DIR_MOD_TIME_CACHE+="$dir|$max_time\n"
     fi
   done
   
-  # Get git-tracked files in this directory with modification times
-  if [[ -z "$rel_path" ]]; then
-    # Root level
-    while IFS= read -r line; do
-      if [[ "$line" != */* && -f "$GIT_ROOT/$line" && ! "$line" =~ ^\. ]]; then
-        # Root-level file
-        if [[ ! -d "$GIT_ROOT/$line" ]] && ! is_binary "$GIT_ROOT/$line"; then
-          # Get modification time
-          local mod_time=$(stat -f "%m" "$GIT_ROOT/$line" 2>/dev/null || stat -c "%Y" "$GIT_ROOT/$line" 2>/dev/null)
-          if [[ -n "$mod_time" ]]; then
-            files+=("$line")
-            file_mod_times+=("$mod_time:$line")
-          fi
-        fi
-      fi
-    done < <(git -C "$GIT_ROOT" ls-files | grep -v "^\." | grep -v "/\.")
-  else
-    # Subdirectory
-    while IFS= read -r line; do
-      local file_rel_path="${line#$rel_path}"
-      if [[ "$line" == "$rel_path"* && "$file_rel_path" != */* && -f "$GIT_ROOT/$line" ]]; then
-        # No more directories in path, file in this directory
-        if ! is_binary "$GIT_ROOT/$line"; then
-          # Get modification time
-          local mod_time=$(stat -f "%m" "$GIT_ROOT/$line" 2>/dev/null || stat -c "%Y" "$GIT_ROOT/$line" 2>/dev/null)
-          if [[ -n "$mod_time" ]]; then
-            local file_name="${line#$rel_path}"
-            files+=("$file_name")
-            file_mod_times+=("$mod_time:$file_name")
-          fi
-        fi
-      fi
-    done < <(git -C "$GIT_ROOT" ls-files "$rel_path" | grep -v "^\." | grep -v "/\.")
+  if [[ "$DEBUG_MODE" -eq 1 ]]; then
+    local cache_count=$(echo -e "$DIR_MOD_TIME_CACHE" | wc -l)
+    echo "DEBUG [build_dir_mod_time_cache]: Added $cache_count directories to cache" >&2
+  fi
+}
+
+# Get modification time for a file from cache
+get_file_mod_time() {
+  local file_path="$1"
+  echo -e "$FILE_CACHE" | grep "^$file_path|" | cut -d'|' -f2
+}
+
+# Get directory modification time from cache
+get_dir_mod_time() {
+  local dir_path="$1"
+  
+  # Try getting from cache first
+  local cached_time=$(echo -e "$DIR_MOD_TIME_CACHE" | grep "^$dir_path|" | cut -d'|' -f2)
+  
+  if [[ -n "$cached_time" ]]; then
+    echo "$cached_time"
+    return
   fi
   
-  # Sort by modification time (most recent first)
-  IFS=$'\n'
-  sorted_dir_times=($(for time_dir in "${dir_mod_times[@]}"; do echo "$time_dir"; done | sort -rn))
-  sorted_file_times=($(for time_file in "${file_mod_times[@]}"; do echo "$time_file"; done | sort -rn))
-  unset IFS
+  # If not in cache, calculate it
+  local pattern="^$dir_path/"
+  local matches=$(echo -e "$FILE_CACHE" | grep "$pattern")
+  local max_time=$(echo "$matches" | cut -d'|' -f2 | sort -nr | head -n1)
+  
+  # Fall back to directory's own time if no files found
+  if [[ -z "$max_time" ]]; then
+    local stat_fmt="%Y"
+    local stat_opt="-c"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+      stat_fmt="%m"
+      stat_opt="-f"
+    fi
+    max_time=$(stat $stat_opt "$stat_fmt" "$GIT_ROOT/$dir_path" 2>/dev/null)
+  fi
+  
+  # Add to cache for future use
+  DIR_MOD_TIME_CACHE+="$dir_path|$max_time\n"
+  
+  echo "$max_time"
+}
 
-  # Create a simple array to keep track of dir-preview pairs before sorting
-  local dir_preview_pairs=()
-  for i in "${!dirs[@]}"; do
-    dir_preview_pairs+=("${dir_mod_times[$i]}:${dir_previews[$i]}")
-  done
+# Get a list of all items (files and directories) in a path - optimized version
+get_all_items() {
+  local current_dir="$1"
+  local rel_path
+  local items_with_times=""
 
-  # Clear the arrays for sorted content
-  dirs=()
-  files=()
-  dir_previews=()
+  # Get relative path from git root
+  if [[ "$current_dir" == "$GIT_ROOT" ]]; then
+    rel_path=""
+  else
+    rel_path="${current_dir#$GIT_ROOT/}"
+  fi
 
-  # Rebuild arrays in modification time order
-  for time_dir in "${sorted_dir_times[@]}"; do
-    local sorted_dir="${time_dir#*:}"
-    dirs+=("$sorted_dir")
+  # Filter pattern construction - much faster than multiple string operations in a loop
+  local pattern
+  if [[ -z "$rel_path" ]]; then
+    # For root directory, we want only files without slashes
+    pattern="^[^/]*$"
+  else
+    # For subdirectories, match files in that exact directory level
+    pattern="^$rel_path/[^/]*$"
+  fi
 
-    # Find the matching preview
-    for pair in "${dir_preview_pairs[@]}"; do
-      if [[ "$pair" == "$time_dir:"* ]]; then
-        dir_previews+=("${pair#*:}")
-        break
+  # Process files in this directory - use grep to pre-filter candidates
+  # This dramatically reduces the number of iterations needed
+  local matching_files=$(echo -e "$FILE_CACHE" | grep -E "$pattern")
+
+  while read -r line; do
+    if [[ -z "$line" ]]; then
+      continue  # Skip empty lines
+    fi
+
+    local file_path="${line%%|*}"
+    local mod_time="${line##*|}"
+
+    # For root directory items
+    if [[ -z "$rel_path" ]]; then
+      items_with_times+="$mod_time|f|$file_path\n"
+    # For subdirectory items
+    else
+      local rel_file="${file_path#$rel_path/}"
+      items_with_times+="$mod_time|f|$rel_file\n"
+    fi
+  done < <(echo "$matching_files")
+  
+  # Build a list of direct subdirectories more efficiently
+  local subdirs=()
+  local seen_dirs=""
+
+  while read -r line; do
+    if [[ -z "$line" ]]; then
+      continue  # Skip empty lines
+    fi
+
+    local file_path="${line%%|*}"
+
+    # Extract subdirectory based on current path
+    if [[ -z "$rel_path" ]]; then
+      # Root directory - get first level directories
+      if [[ "$file_path" == */* ]]; then
+        local dir="${file_path%%/*}"
+        # Faster check with direct string match
+        if [[ "$seen_dirs" != *"|$dir|"* ]]; then
+          subdirs+=("$dir")
+          seen_dirs+="|$dir|"
+        fi
       fi
-    done
-  done
-
-  for time_file in "${sorted_file_times[@]}"; do
-    files+=("${time_file#*:}")
+    elif [[ "$file_path" == "$rel_path/"* ]]; then
+      # Subdirectory - extract next level directories
+      local rel_file="${file_path#$rel_path/}"
+      if [[ "$rel_file" == */* ]]; then
+        local dir="${rel_file%%/*}"
+        # Faster check with direct string match
+        if [[ "$seen_dirs" != *"|$dir|"* ]]; then
+          subdirs+=("$dir")
+          seen_dirs+="|$dir|"
+        fi
+      fi
+    fi
+  done < <(echo -e "$FILE_CACHE")
+  
+  # Add directories with their modification times
+  for dir in "${subdirs[@]}"; do
+    # Skip hidden directories
+    if [[ "$dir" =~ ^\. || "$dir" == "node_modules" || "$dir" == ".git" ]]; then
+      continue
+    fi
+    
+    local dir_path_full
+    if [[ -z "$rel_path" ]]; then
+      dir_path_full="$dir"
+    else
+      dir_path_full="$rel_path/$dir"
+    fi
+    
+    local mod_time=$(get_dir_mod_time "$dir_path_full")
+    if [[ -n "$mod_time" ]]; then
+      items_with_times+="$mod_time|d|$dir/\n"
+    fi
   done
   
-  # Return arrays through variable references
-  eval "$2=(${dirs[*]@Q})"
-  eval "$3=(${files[*]@Q})"
-  eval "$4=(${dir_previews[*]@Q})"
+  # Return all items sorted by modification time (newest first)
+  if [[ -n "$items_with_times" ]]; then
+    echo -e "$items_with_times" | sort -t'|' -k1,1nr
+  fi
+}
+
+# Get preview of a directory (up to 3 most recent items) - fixed for proper display
+get_directory_preview() {
+  local dir_path="$1"
+  local max_items="$2"
+  local full_path="$GIT_ROOT/$dir_path"
+
+  # Get all items in this directory, sorted by recency
+  local all_items=$(get_all_items "$full_path")
+
+  # Process and store items in a temporary file for reliable output
+  local temp_file=$(mktemp)
+  if [[ -n "$all_items" ]]; then
+    # Get first max_items entries only
+    local count=0
+    while IFS='|' read -r time type name; do
+      if [[ "$type" == "d" ]]; then
+        echo "📁 $name" >> "$temp_file"
+      else
+        echo "📄 $name" >> "$temp_file"
+      fi
+
+      ((count++))
+      if [[ $count -eq $max_items ]]; then
+        break
+      fi
+    done < <(echo -e "$all_items")
+  fi
+
+  if [[ ! -s "$temp_file" ]]; then
+    rm "$temp_file"
+    echo "(Empty directory)"
+  else
+    # Read the file line by line and format output
+    cat "$temp_file"
+    rm "$temp_file"
+  fi
+}
+
+# Get contents of current directory
+get_directory_contents() {
+  local current_dir="$1"
+  
+  # Get all items with mod times, sorted by recency
+  local sorted_items=$(get_all_items "$current_dir")
+  
+  # Parse items into arrays
+  ITEMS=()
+  ITEM_TYPES=()
+  MOD_TIMES=()
+  PREVIEWS=()
+  
+  if [[ -n "$sorted_items" ]]; then
+    while read -r item; do
+      if [[ -z "$item" ]]; then
+        continue
+      fi
+      
+      local mod_time=$(echo "$item" | cut -d'|' -f1)
+      local type=$(echo "$item" | cut -d'|' -f2)
+      local name=$(echo "$item" | cut -d'|' -f3)
+      
+      ITEMS+=("$name")
+      ITEM_TYPES+=("$type")
+      MOD_TIMES+=("$mod_time")
+      
+      # Get previews for directories
+      if [[ "$type" == "d" ]]; then
+        local dir_path
+        if [[ "$current_dir" == "$GIT_ROOT" ]]; then
+          dir_path="${name%/}"
+        else
+          dir_path="${current_dir#$GIT_ROOT/}/${name%/}"
+        fi
+        
+        local preview=$(get_directory_preview "$dir_path" 3)
+        PREVIEWS+=("$preview")
+      else
+        PREVIEWS+=("")  # Empty preview for files
+      fi
+    done < <(echo "$sorted_items")
+  fi
 }
 
 # Start interactive file selection
 echo "Starting interactive file selection..."
 echo "Enter number to select file or navigate to directory."
 SELECTED_FILES=()
-CURRENT_DIR="$(pwd)"
+CURRENT_DIR="$GIT_ROOT"
+
+# Global arrays for directory contents
+ITEMS=()
+ITEM_TYPES=()
+MOD_TIMES=()
+PREVIEWS=()
+
+# Initialize file cache
+build_file_cache
+build_dir_mod_time_cache
 
 # Show files in the current directory
 show_files() {
   local current_dir="$1"
-  local dir_list=()
-  local file_list=()
-  local dir_preview_list=()
-  local items=()
-  local i=0
-
+  local items_index=()
+  
   # Change to the directory
   cd "$current_dir" || return
-
+  
   # Display current location and selection info
   echo "Directory: $current_dir"
   echo "Selected: ${#SELECTED_FILES[@]} files"
   echo "---------------------------------------------"
+  
+  # Get all items in this directory, already sorted by modification time
+  get_directory_contents "$current_dir"
+  
+  # Display items
+  local idx=0
+  local item_count=0
+  local max_previews=3
 
-  # Get directories and files in this location
-  list_files_and_dirs "$current_dir" dir_list file_list dir_preview_list
+  for i in "${!ITEMS[@]}"; do
+    local item="${ITEMS[$i]}"
+    local type="${ITEM_TYPES[$i]}"
+    local preview="${PREVIEWS[$i]}"
+    local show_preview=0
 
-  # The lists are already sorted by modification time through list_files_and_dirs
-  sorted_dirs=("${dir_list[@]}")
-  sorted_files=("${file_list[@]}")
-
-  # Print directories with folder emoji and preview of contents
-  local preview_idx=0
-
-  # Reset counter properly with local scope
-  i=0  # Ensure we start from 0
-  for dir in "${sorted_dirs[@]}"; do
-    echo "[$i] 📁 $dir/"
-
-    # Generate direct preview for this directory
-    local dir_path="$current_dir/$dir"
-    local preview_files=()
-
-    # Get overview of this directory
-    if [[ -d "$dir_path" ]]; then
-      local dir_rel_path="${dir_path#$GIT_ROOT/}"
-
-      # Get a combined list of directories and files, sorted by modification time
-      local all_items=()
-      local all_item_times=()
-
-      # Find subdirectories that are part of git repo (by checking .git existence)
-      # Get list of filtered directories from find (non-hidden only)
-      while read -r d; do
-        local dir_name=$(basename "$d")
-        # Only include directories that are not hidden
-        if [[ ! "$dir_name" =~ ^\. && -d "$d" && "$dir_name" != "node_modules" ]]; then
-          # Check for files in Git inside this directory
-          local dir_rel_to_git="${d#$GIT_ROOT/}"
-          # Count matching files in git that start with this directory path
-          if [[ -z "$dir_rel_to_git" || "$d" == "$GIT_ROOT" ]]; then
-            # Special case for root - should never happen here
-            continue
-          else
-            # Check if this directory has any git-tracked files within it
-            local git_file_count=$(git -C "$GIT_ROOT" ls-files "$dir_rel_to_git/" | wc -l)
-            if [[ $git_file_count -gt 0 ]]; then
-              # Get modification time
-              local mod_time
-              if [[ "$OSTYPE" == "darwin"* ]]; then
-                mod_time=$(stat -f "%m" "$d" 2>/dev/null)
-              else
-                mod_time=$(stat -c "%Y" "$d" 2>/dev/null)
-              fi
-              if [[ -n "$mod_time" ]]; then
-                all_items+=("$dir_name/")  # Add trailing slash to directories
-                all_item_times+=("$mod_time:$dir_name/")
-              fi
-            fi
-          fi
-        fi
-      done < <(find "$dir_path" -maxdepth 1 -type d -not -path "$dir_path")
-
-      # Get files with modification times
-      if [[ "$dir_path" == "$GIT_ROOT" ]]; then
-        # Root level files
-        while read -r file; do
-          local full_path="$GIT_ROOT/$file"
-          if [[ -f "$full_path" && ! "$file" =~ ^\. ]]; then
-            # Get modification time
-            local mod_time
-            if [[ "$OSTYPE" == "darwin"* ]]; then
-              mod_time=$(stat -f "%m" "$full_path" 2>/dev/null)
-            else
-              mod_time=$(stat -c "%Y" "$full_path" 2>/dev/null)
-            fi
-            if [[ -n "$mod_time" ]]; then
-              all_items+=("$file")
-              all_item_times+=("$mod_time:$file")
-            fi
-          fi
-        done < <(git -C "$GIT_ROOT" ls-files | grep -v "^\." | grep -v "/\." | grep -v "/")
-      else
-        # Subdirectory files
-        while read -r file; do
-          local full_path="$GIT_ROOT/$file"
-          local file_rel_path="${file#$dir_rel_path/}"
-          if [[ "$file" == "$dir_rel_path"* && "$file_rel_path" != */* && -f "$full_path" ]]; then
-            # Get modification time
-            local mod_time
-            if [[ "$OSTYPE" == "darwin"* ]]; then
-              mod_time=$(stat -f "%m" "$full_path" 2>/dev/null)
-            else
-              mod_time=$(stat -c "%Y" "$full_path" 2>/dev/null)
-            fi
-            if [[ -n "$mod_time" ]]; then
-              all_items+=("$(basename "$full_path")")
-              all_item_times+=("$mod_time:$(basename "$full_path")")
-            fi
-          fi
-        done < <(git -C "$GIT_ROOT" ls-files "$dir_rel_path/" | grep -v "^\." | grep -v "/\.")
-      fi
-
-      # Sort all items by modification time
-      IFS=$'\n'
-      sorted_item_times=($(for time_item in "${all_item_times[@]}"; do echo "$time_item"; done | sort -rn))
-      unset IFS
-
-      # Get top 3 items
-      local preview=""
-      for ((idx=0; idx<${#sorted_item_times[@]} && idx<3; idx++)); do
-        local item="${sorted_item_times[$idx]#*:}"
-        if [[ -n "$preview" ]]; then
-          preview="$preview"$'\n'"$item"
-        else
-          preview="$item"
-        fi
-      done
-
-      # Display the preview
-      if [[ -n "$preview" ]]; then
-        echo "    └─ $(echo "$preview" | head -n 1)"
-        echo "$preview" | tail -n +2 | sed 's/^/       /'
-      else
-        echo "    └─ (Empty directory)"
-      fi
+    # Determine if this item should get a preview (only first 3 items that are directories)
+    if [[ "$type" == "d" && $item_count -lt $max_previews ]]; then
+      show_preview=1
     fi
 
-    items[$i]="d:$dir"
-    ((i++))
-    ((preview_idx++))
-  done
-  
-  # Print files with file emoji
-  for file in "${sorted_files[@]}"; do
-    echo "[$i] 📄 $file"
-    items[$i]="f:$file"
-    ((i++))
+    # Display item with index
+    if [[ "$type" == "d" ]]; then
+      echo "[$idx] 📁 $item"
+
+      # Only show previews for the first 3 items in the overall listing
+      if [[ $show_preview -eq 1 && "$preview" != "(Empty directory)" ]]; then
+        # Create a temporary file and read line by line for proper formatting
+        local temp_file=$(mktemp)
+        echo "$preview" > "$temp_file"
+
+        # Read line by line with correct formatting
+        local line_num=0
+        while IFS= read -r line; do
+          if [[ $line_num -eq 0 ]]; then
+            echo "    └─ $line"
+          else
+            echo "       $line"
+          fi
+          ((line_num++))
+        done < "$temp_file"
+
+        rm "$temp_file"
+      fi
+    else
+      echo "[$idx] 📄 $item"
+    fi
+
+    # Increment item counter regardless of type
+    ((item_count++))
+    
+    # Keep track of original index for selection
+    items_index[$idx]="$type:$item"
+    ((idx++))
   done
   
   # Show command prompt
@@ -505,7 +588,7 @@ show_files() {
       echo "  h, ?      - Show this help"
       echo ""
       echo "Navigation Tips:"
-      echo "  • Files are sorted by modification time (most recent first)"
+      echo "  • Files and directories are sorted by modification time (most recent first)"
       echo "  • Only git-tracked files are shown (respects .gitignore)"
       echo "  • Hidden files and directories (starting with .) are excluded"
       echo "  • Binary files are automatically filtered out"
@@ -535,14 +618,14 @@ show_files() {
       ;;
     *)
       # Check if input is a number within range
-      if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -lt "$i" ]; then
-        local item="${items[$selection]}"
+      if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -lt "$idx" ]; then
+        local item="${items_index[$selection]}"
         local type="${item%%:*}"
         local name="${item#*:}"
         
         if [ "$type" == "d" ]; then
-          # Navigate into directory
-          CURRENT_DIR="$CURRENT_DIR/$name"
+          # Navigate into directory (remove trailing slash)
+          CURRENT_DIR="$CURRENT_DIR/${name%/}"
         elif [ "$type" == "f" ]; then
           # Add file to selection if not already selected
           local full_path="$CURRENT_DIR/$name"
@@ -664,8 +747,11 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
       continue
     fi
     
-    # Skip binary files
-    if is_binary "$FILE"; then
+    # Skip binary files and handle missing files
+    if [[ ! -f "$FILE" ]]; then
+      echo "Warning: File not found or was removed: $FILE" >&2
+      continue
+    elif is_binary "$FILE"; then
       echo "Warning: Skipping binary file: $FILE" >&2
       continue
     fi
