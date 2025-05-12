@@ -146,12 +146,10 @@ LIST_FILE=$(mktemp)
 ORDER_FILE=$(mktemp)
 trap 'rm -f "$TEMP_FILE" "$LIST_FILE" "$ORDER_FILE"' EXIT
 
-# Cache for file paths and modification times
 FILE_CACHE_FILE=$(mktemp)
 DIR_MOD_TIME_CACHE_FILE=$(mktemp)
-trap 'rm -f "$TEMP_FILE" "$LIST_FILE" "$ORDER_FILE" "$FILE_CACHE_FILE" "$DIR_MOD_TIME_CACHE_FILE" /tmp/tmp.*' EXIT
+trap 'rm -f "$TEMP_FILE" "$LIST_FILE" "$ORDER_FILE" "$FILE_CACHE_FILE" "$DIR_MOD_TIME_CACHE_FILE" "$TEMP_FILE.split."* "$LIST_FILE.tmp" "$LIST_FILE.tmp2" "$LIST_FILE.tree" /tmp/tmp.*' EXIT
 
-# Build file modification time cache
 build_file_cache() {
   local stat_fmt="%Y"
   local stat_opt="-c"
@@ -160,7 +158,6 @@ build_file_cache() {
     stat_opt="-f"
   fi
 
-  # Get all git-tracked files (excluding hidden files) with a single command
   if [[ "$DEBUG_MODE" -eq 1 ]]; then
     echo "DEBUG [build_file_cache]: Building file cache..." >&2
   fi
@@ -172,9 +169,9 @@ build_file_cache() {
     echo "DEBUG [build_file_cache]: Found $file_count files from git" >&2
   fi
 
+
   > "$FILE_CACHE_FILE"
 
-  # Process in smaller batches to avoid command line length issues
   split -l 500 "$TEMP_FILE" "$TEMP_FILE.split."
 
   for split_file in "$TEMP_FILE.split."*; do
@@ -200,7 +197,6 @@ build_file_cache() {
   fi
 }
 
-# Build directory modification time cache
 build_dir_mod_time_cache() {
   if [[ "$DEBUG_MODE" -eq 1 ]]; then
     echo "DEBUG [build_dir_mod_time_cache]: Building directory modification time cache..." >&2
@@ -209,11 +205,9 @@ build_dir_mod_time_cache() {
   awk -F'|' '
     BEGIN { OFS="|" }
     $1 ~ /\// {
-      # Process each file path component
       parts = split($1, path_parts, "/")
       time = $2
 
-      # Build paths incrementally
       curr_path = ""
       for (i=1; i < parts; i++) {
         if (curr_path == "") {
@@ -222,7 +216,6 @@ build_dir_mod_time_cache() {
           curr_path = curr_path "/" path_parts[i]
         }
 
-        # Update directory with max time
         if (!(curr_path in dirs) || time > dirs[curr_path]) {
           dirs[curr_path] = time
         }
@@ -241,26 +234,21 @@ build_dir_mod_time_cache() {
   fi
 }
 
-# Get modification time for a file from cache
 get_file_mod_time() {
   local file_path="$1"
   grep "^$file_path|" "$FILE_CACHE_FILE" | cut -d'|' -f2
 }
 
-# Get directory modification time from cache
 get_dir_mod_time() {
   local dir_path="$1"
 
   local cached_time=$(grep "^$dir_path|" "$DIR_MOD_TIME_CACHE_FILE" | cut -d'|' -f2)
-
   if [[ -n "$cached_time" ]]; then
     echo "$cached_time"
     return
   fi
 
-  local pattern="^$dir_path/"
-  local matches=$(grep "$pattern" "$FILE_CACHE_FILE")
-  local max_time=$(echo "$matches" | cut -d'|' -f2 | sort -nr | head -n1)
+  local max_time=$(awk -F'|' -v path="$dir_path/" '$1 ~ "^"path { if ($2 > max || max=="") max=$2 } END {print max}' "$FILE_CACHE_FILE")
 
   if [[ -z "$max_time" ]]; then
     local stat_fmt="%Y"
@@ -277,7 +265,6 @@ get_dir_mod_time() {
   echo "$max_time"
 }
 
-# Get a list of all items (files and directories) in a path
 get_all_items() {
   local current_dir="$1"
   local rel_path
@@ -300,14 +287,14 @@ get_all_items() {
   local dir_list_file=$(mktemp)
 
   if [[ -z "$rel_path" ]]; then
-    grep -E "/" "$FILE_CACHE_FILE" | cut -d'|' -f1 | cut -d'/' -f1 | grep -v "^\." | grep -v "^node_modules$" | grep -v "^.git$" | sort | uniq > "$dir_list_file"
+    grep -E "/" "$FILE_CACHE_FILE" | cut -d'|' -f1 | cut -d'/' -f1 | grep -v "^\." | sort | uniq > "$dir_list_file"
   else
     grep -E "^$rel_path/" "$FILE_CACHE_FILE" |
       awk -F'|' -v path="$rel_path/" '{
         sub(path, "", $1);
         if (index($1, "/") > 0) {
           dir = substr($1, 1, index($1, "/")-1);
-          if (dir != "." && dir != ".git" && dir != "node_modules" && dir !~ /^\./)
+          if (dir != "." && dir !~ /^\./)
             print dir
         }
       }' | sort | uniq > "$dir_list_file"
@@ -325,10 +312,7 @@ get_all_items() {
       dir_path_full="$rel_path/$dir"
     fi
 
-    local mod_time=$(grep -E "^$dir_path_full\|" "$DIR_MOD_TIME_CACHE_FILE" | cut -d'|' -f2)
-    if [[ -z "$mod_time" ]]; then
-      mod_time=$(get_dir_mod_time "$dir_path_full")
-    fi
+    local mod_time=$(get_dir_mod_time "$dir_path_full")
 
     if [[ -n "$mod_time" ]]; then
       echo "$mod_time|d|$dir/" >> "$items_temp_file"
@@ -344,16 +328,13 @@ get_all_items() {
   rm "$items_temp_file"
 }
 
-# Get preview of a directory (up to 3 most recent items)
 get_directory_preview() {
   local dir_path="$1"
   local max_items="$2"
   local full_path="$GIT_ROOT/$dir_path"
 
-  # Get all items in this directory, sorted by recency
   local all_items=$(get_all_items "$full_path")
 
-  # Process and return items directly
   if [[ -z "$all_items" ]]; then
     echo "(Empty directory)"
     return
@@ -378,7 +359,6 @@ get_directory_preview() {
   echo -e "$result"
 }
 
-# Get contents of current directory
 get_directory_contents() {
   local current_dir="$1"
   
@@ -420,9 +400,13 @@ get_directory_contents() {
   fi
 }
 
-# Start interactive file selection
 echo "Starting interactive file selection..."
-echo "Enter number to select file or navigate to directory."
+echo "Quick Selection Guide:"
+echo "  - Enter number to select file or navigate into directory"
+echo "  - Use '*' to select all files in current directory"
+echo "  - Use '**' to select all files recursively"
+echo "  - Enter '1,3,5' to select multiple files by index"
+echo "  - Enter '1-5' to select a range of files"
 SELECTED_FILES=()
 CURRENT_DIR="$GIT_ROOT"
 
@@ -434,7 +418,6 @@ PREVIEWS=()
 build_file_cache
 build_dir_mod_time_cache
 
-# Show files in the current directory
 show_files() {
   local current_dir="$1"
   local items_index=()
@@ -486,7 +469,7 @@ show_files() {
   done
   
   echo "---------------------------------------------"
-  echo "Commands: [..] up, [d] done, [l] list, [q] quit, [h] help"
+  echo "Commands: [..] up, [/] root, [d] done, [l] list, [q] quit, [h] help"
   echo "---------------------------------------------"
   
   read -p "> " selection
@@ -494,12 +477,17 @@ show_files() {
   case "$selection" in
     "help"|"h"|"?")
       echo "Interactive Navigation Commands:"
-      echo "  [number]  - Select a file or enter directory"
-      echo "  ..        - Go up to parent directory"
-      echo "  d         - Done, finish selection and generate LLM-ready output"
-      echo "  l         - List currently selected files"
-      echo "  q         - Quit without processing"
-      echo "  h, ?      - Show this help"
+      echo "  [number]                - Select a file or enter directory"
+      echo "  [num1,num2,...]        - Select multiple files by comma-separated list"
+      echo "  [num1-num2]            - Select range of files (inclusive)"
+      echo "  *                      - Select all files in current directory"
+      echo "  **                     - Select all files in current directory and subdirectories"
+      echo "  ..                     - Go up to parent directory"
+      echo "  /                      - Return to repository root directory"
+      echo "  d                      - Done, finish selection and generate LLM-ready output"
+      echo "  l                      - List currently selected files"
+      echo "  q                      - Quit without processing"
+      echo "  h, ?                   - Show this help"
       echo ""
       echo "Navigation Tips:"
       echo "  • Files and directories are sorted by modification time (most recent first)"
@@ -528,12 +516,126 @@ show_files() {
         echo "Already at repository root"
       fi
       ;;
-    *)
+    "/")
+      CURRENT_DIR="$GIT_ROOT"
+      echo "Returned to repository root"
+      ;;
+    "*")
+      local count=0
+      for i in "${!ITEMS[@]}"; do
+        local type="${ITEM_TYPES[$i]}"
+        local name="${ITEMS[$i]}"
+
+        if [ "$type" == "f" ]; then
+          local full_path="$CURRENT_DIR/$name"
+          if [[ ! -f "$full_path" ]]; then
+            continue
+          elif [[ " ${SELECTED_FILES[*]} " =~ " ${full_path} " ]]; then
+            continue
+          else
+            SELECTED_FILES+=("$full_path")
+            ((count++))
+          fi
+        fi
+      done
+      echo "Selected $count files from current directory"
+      ;;
+
+    "**")
+      local rel_path=""
+      if [[ "$CURRENT_DIR" != "$GIT_ROOT" ]]; then
+        rel_path="${CURRENT_DIR#$GIT_ROOT/}"
+      fi
+
+      local count=0
+
+      while IFS= read -r line; do
+        file_path=$(echo "$line" | cut -d'|' -f1)
+        if [[ -z "$file_path" ]]; then continue; fi
+
+        full_path="$GIT_ROOT/$file_path"
+
+        if [[ ! " ${SELECTED_FILES[*]} " =~ " $full_path " ]]; then
+          SELECTED_FILES+=("$full_path")
+          ((count++))
+        fi
+      done < <(grep "^$rel_path" "$FILE_CACHE_FILE")
+
+      echo "Selected $count files recursively from $CURRENT_DIR"
+      ;;
+
+    [0-9]*-[0-9]*)
+      local start end
+      if [[ "$selection" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        start="${BASH_REMATCH[1]}"
+        end="${BASH_REMATCH[2]}"
+
+        if [ "$start" -lt "$idx" ] && [ "$end" -lt "$idx" ] && [ "$start" -le "$end" ]; then
+          local count=0
+          for ((i=start; i<=end; i++)); do
+            local item="${items_index[$i]}"
+            local type="${item%%:*}"
+            local name="${item#*:}"
+
+            if [ "$type" == "f" ]; then
+              local full_path="$CURRENT_DIR/$name"
+              if [[ ! -f "$full_path" ]]; then
+                continue
+              elif [[ " ${SELECTED_FILES[*]} " =~ " ${full_path} " ]]; then
+                continue
+              else
+                SELECTED_FILES+=("$full_path")
+                ((count++))
+              fi
+            fi
+          done
+          echo "Selected $count files from range $start-$end"
+        else
+          echo "Invalid range: $selection"
+        fi
+      else
+        echo "Invalid range format: $selection"
+      fi
+      ;;
+
+    [0-9]*,[0-9]*)
+      if [[ "$selection" =~ ^[0-9,]+$ ]]; then
+        IFS=',' read -ra NUMS <<< "$selection"
+        local count=0
+
+        for num in "${NUMS[@]}"; do
+          if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -lt "$idx" ]; then
+            local item="${items_index[$num]}"
+            local type="${item%%:*}"
+            local name="${item#*:}"
+
+            if [ "$type" == "f" ]; then
+              local full_path="$CURRENT_DIR/$name"
+              if [[ ! -f "$full_path" ]]; then
+                continue
+              elif [[ " ${SELECTED_FILES[*]} " =~ " ${full_path} " ]]; then
+                continue
+              else
+                SELECTED_FILES+=("$full_path")
+                ((count++))
+              fi
+            elif [ "$type" == "d" ]; then
+              echo "Note: Cannot select directory #$num ($name) in a list - use individual selection to navigate"
+            fi
+          else
+            echo "Skipping invalid selection: $num"
+          fi
+        done
+        echo "Selected $count files from list $selection"
+      fi
+      ;;
+
+    [0-9]*)
       if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -lt "$idx" ]; then
         local item="${items_index[$selection]}"
         local type="${item%%:*}"
         local name="${item#*:}"
-        
+
         if [ "$type" == "d" ]; then
           CURRENT_DIR="$CURRENT_DIR/${name%/}"
         elif [ "$type" == "f" ]; then
@@ -550,6 +652,10 @@ show_files() {
       else
         echo "Invalid selection: $selection"
       fi
+      ;;
+
+    *)
+      echo "Invalid selection: $selection"
       ;;
   esac
   
@@ -593,17 +699,31 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
   cp "$LIST_FILE" "$ORDER_FILE"
   
   PREV_PARTS=()
+  INDENT_CACHE=()
+  for ((i=0; i<10; i++)); do
+    INDENT_CACHE[i]=$(printf '|   %.0s' $(seq 1 $i))
+  done
+
+  get_indent() {
+    local depth=$1
+    if [ "$depth" -lt 10 ]; then
+      echo "${INDENT_CACHE[$depth]}"
+    else
+      printf '|   %.0s' $(seq 1 $depth)
+    fi
+  }
+
   while IFS= read -r FILE_PATH; do
     if [[ "$FILE_PATH" != *"/"* ]]; then
       echo "+-- $FILE_PATH"
       continue
     fi
-    
+
     DIR_PATH=$(dirname "$FILE_PATH")
     FILENAME=$(basename "$FILE_PATH")
-    
+
     IFS='/' read -ra CURR_PARTS <<< "$DIR_PATH"
-    
+
     COMMON_PREFIX_LEN=0
     for ((i=0; i<${#PREV_PARTS[@]} && i<${#CURR_PARTS[@]}; i++)); do
       if [[ "${PREV_PARTS[i]}" == "${CURR_PARTS[i]}" ]]; then
@@ -612,19 +732,17 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
         break
       fi
     done
-    
+
     for ((i=COMMON_PREFIX_LEN; i<${#CURR_PARTS[@]}; i++)); do
-      INDENT=$(printf '|   %.0s' $(seq 1 $i))
       if [[ $i -eq 0 ]]; then
         echo "+-- ${CURR_PARTS[i]}"
       else
-        echo "$INDENT+-- ${CURR_PARTS[i]}"
+        echo "$(get_indent $i)+-- ${CURR_PARTS[i]}"
       fi
     done
-    
-    INDENT=$(printf '|   %.0s' $(seq 1 ${#CURR_PARTS[@]}))
-    echo "$INDENT+-- $FILENAME"
-    
+
+    echo "$(get_indent ${#CURR_PARTS[@]})+-- $FILENAME"
+
     PREV_PARTS=("${CURR_PARTS[@]}")
   done < "$LIST_FILE"
   
@@ -638,19 +756,14 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
       continue
     fi
     
-    if [[ ! -f "$FILE" ]]; then
-      echo "Warning: File not found or was removed: $FILE" >&2
-      continue
-    fi
-    
     echo -e "\n\n"
-    echo -e "###############################################################"
+    echo -e "########"
     echo -e "# FILE: $FILE"
-    echo -e "###############################################################"
+    echo -e "########"
     echo -e "\n<file-contents>"
     cat "$FILE"
     
-    if [ "$(tail -c1 "$FILE" | wc -l)" -eq 0 ]; then
+    if [ -s "$FILE" ] && [ "$(tail -c1 "$FILE")" != "$(printf '\n')" ]; then
       echo ""
     fi
     echo "</file-contents>"
@@ -658,20 +771,29 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
 } > "$TEMP_FILE"
 
 CLIPBOARD_SUCCESS=0
+CLIPBOARD_ERROR=""
+
 if command -v pbcopy &> /dev/null; then
   if cat "$TEMP_FILE" | pbcopy; then
     CLIPBOARD_SUCCESS=1
+  else
+    CLIPBOARD_ERROR="pbcopy failed with error code $?"
   fi
 elif command -v xclip &> /dev/null; then
   if cat "$TEMP_FILE" | xclip -selection clipboard; then
     CLIPBOARD_SUCCESS=1
+  else
+    CLIPBOARD_ERROR="xclip failed with error code $?"
   fi
+else
+  CLIPBOARD_ERROR="No clipboard utility found (pbcopy/xclip)"
 fi
 
 if [ $CLIPBOARD_SUCCESS -eq 1 ]; then
-  echo "Repository files copied to clipboard successfully!"
+  echo "Done! Repository files copied to clipboard for LLM chat."
 else
-  echo "Unable to copy to clipboard. Output saved to: $TEMP_FILE"
+  echo "Unable to copy to clipboard: $CLIPBOARD_ERROR"
+  echo "Output saved to: $TEMP_FILE"
   trap - EXIT
 fi
 
@@ -680,6 +802,4 @@ if [ $DEBUG_MODE -eq 1 ]; then
   cat "$TEMP_FILE"
   echo "=== END DEBUG OUTPUT ==="
 fi
-
-echo "Done! Repository files copied to clipboard for LLM chat."
 exit 0
