@@ -272,13 +272,13 @@ build_dir_mod_time_cache() {
 
 get_file_mod_time() {
   local file_path="$1"
-  grep -F "^$(printf "%s" "$file_path")|" "$FILE_CACHE_FILE" | cut -d'|' -f2
+  grep "^$(printf "%s" "$file_path" | sed 's/[][\.^$*+?(){}|/]/\\&/g')|" "$FILE_CACHE_FILE" | cut -d'|' -f2
 }
 
 get_dir_mod_time() {
   local dir_path="$1"
 
-  local cached_time=$(grep -F "^$(printf "%s" "$dir_path")|" "$DIR_MOD_TIME_CACHE_FILE" | cut -d'|' -f2)
+  local cached_time=$(grep "^$(printf "%s" "$dir_path" | sed 's/[][\.^$*+?(){}|/]/\\&/g')|" "$DIR_MOD_TIME_CACHE_FILE" | cut -d'|' -f2)
   if [[ -n "$cached_time" ]]; then
     echo "$cached_time"
     return
@@ -304,7 +304,7 @@ get_dir_mod_time() {
 get_all_items() {
   local current_dir="$1"
   local rel_path
-  local items_temp_file=$(mktemp)
+  local items_temp_file="${TEMPDIR}/items_temp_${RANDOM}.txt"
 
   if [[ "$current_dir" == "$GIT_ROOT" ]]; then
     rel_path=""
@@ -322,7 +322,7 @@ get_all_items() {
       awk -F'|' -v path="$rel_path/" '{gsub(path, "", $1); print $2 "|f|" $1}' >> "$items_temp_file"
   fi
 
-  local dir_list_file=$(mktemp)
+  local dir_list_file="${TEMPDIR}/dir_list_${RANDOM}.txt"
 
   if [[ -z "$rel_path" ]]; then
     grep -E "/" "$FILE_CACHE_FILE" | cut -d'|' -f1 | cut -d'/' -f1 | grep -v "^\." | sort | uniq > "$dir_list_file"
@@ -663,7 +663,7 @@ show_files() {
             local name="${item#*:}"
 
             if [ "$type" == "f" ]; then
-              local full_path="$CURRENT_DIR/$name"
+              local full_path="${CURRENT_DIR}/${name}"
               if [[ ! -f "$full_path" ]]; then
                 continue
               elif [[ " ${SELECTED_FILES[*]} " =~ " ${full_path} " ]]; then
@@ -839,7 +839,7 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
   echo ""
   
   while IFS= read -r REL_PATH; do
-    FILE="$GIT_ROOT/$REL_PATH"
+    FILE="${GIT_ROOT}/${REL_PATH}"
     if [[ ! -f "$FILE" ]]; then
       echo "Error: File not found: $FILE" >&2
       continue
