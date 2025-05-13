@@ -30,27 +30,27 @@
 #   ./repo2llm.sh [repository_path] [options]
 #
 # OPTIONS:
-#   -d, --debug    Debug mode - display the generated output for verification
-#   -h, --help     Show usage information
+#   -d, --debug      Debug mode - display the generated output for verification
+#   -h, --help       Show usage information
 #
 # INTERACTIVE COMMANDS:
-#   [number]       Select a file or navigate into a directory
-#   [num1,num2,..] Select multiple files by comma-separated list
-#   [num1-num2]    Select a range of files (inclusive)
-#   *              Select all files in current directory
-#   **             Select all files recursively
-#   ..             Go up to the parent directory
-#   /              Return to repository root
-#   /path/to/dir   Navigate directly to a subdirectory
-#   /path/to/file  Select a specific file directly
-#   [empty]        Press Enter with no input to finish selection and copy to clipboard
-#   l              List currently selected files
-#   q              Quit without generating output
-#   h              Show help for commands
+#   [number]        Select a file or navigate into a directory
+#   [num1,num2,..]  Select multiple files by comma-separated list
+#   [num1-num2]     Select a range of files (inclusive)
+#   *               Select all files in current directory
+#   **              Select all files recursively
+#   ..              Go up to the parent directory
+#   r               Return to repository root
+#   path            Navigate to path (tab completion works)
+#   [empty]         Press Enter with no input to finish selection and copy to clipboard
+#   d, done         Shortcut to finish selection and copy to clipboard
+#   l, list         List currently selected files
+#   q, quit, exit   Quit without generating output
+#   h, help, ?      Show help for commands
 #
 # EXIT CODES:
-#   0              Success
-#   1              Error (invalid arguments, not a git repository, etc.)
+#   0               Success
+#   1               Error (invalid arguments, not a git repository, etc.)
 #
 # NOTES:
 #   - The script creates temporary files for processing which are automatically
@@ -69,46 +69,66 @@
 REPO_PATH="."
 DEBUG_MODE=0
 
-print_usage() {
+show_help() {
+  local interactive_mode=${1:-0}
+  
+  if [[ "$interactive_mode" -eq 1 ]]; then
+    tput clear
+    tput cup 0 0
+  fi
+  
   echo "repo2llm.sh - Generate structured git repository output for LLMs"
   echo ""
-  echo "DESCRIPTION:"
-  echo "  This script extracts code from git repositories in a format optimized for"
-  echo "  interaction with Large Language Models (LLMs). It provides an interactive"
-  echo "  file selection interface sorted by modification time (most recent first),"
-  echo "  then generates a structured output with a directory tree and file contents."
+  
+  if [[ "$interactive_mode" -eq 0 ]]; then
+    echo "DESCRIPTION:"
+    echo "  This script extracts code from git repositories in a format optimized for"
+    echo "  interaction with Large Language Models (LLMs). It provides an interactive"
+    echo "  file selection interface sorted by modification time (most recent first),"
+    echo "  then generates a structured output with a directory tree and file contents."
+    echo ""
+    echo "USAGE:"
+    echo "  $(basename "$0") [repository_path] [options]"
+    echo ""
+    echo "OPTIONS:"
+    echo "  -d, --debug     Debug mode to display the output"
+    echo "  -h, --help      Show this help message"
+    echo ""
+  fi
+  
+  echo "INTERACTIVE COMMANDS:"
+  echo "  [number]        Select a file or navigate into a directory"
+  echo "  [num1,num2,..]  Select multiple files by comma-separated list"
+  echo "  [num1-num2]     Select range of files (inclusive)"
+  echo "  *               Select all files in current directory"
+  echo "  **              Select all files recursively"
+  echo "  ..              Go up to the parent directory"
+  echo "  r               Return to repository root"
+  echo "  path            Navigate to path (tab completion works)"
+  echo "  [empty]         Press Enter with no input to finish selection and copy to clipboard"
+  echo "  d, done         Shortcut to finish selection and copy to clipboard"
+  echo "  l, list         List currently selected files"
+  echo "  q, quit, exit   Quit without generating output"
+  echo "  h, help, ?      Show help for commands"
   echo ""
-  echo "USAGE:"
-  echo "  $0 [repository_path] [options]"
-  echo ""
-  echo "OPTIONS:"
-  echo "  -d, --debug              Debug mode to display the output"
-  echo "  -h, --help               Show this help message"
-  echo ""
-  echo "INTERACTIVE NAVIGATION COMMANDS:"
-  echo "  [number]                 Select a file or navigate into a directory"
-  echo "  [num1,num2,...]         Select multiple files by comma-separated list"
-  echo "  [num1-num2]             Select range of files (inclusive)"
-  echo "  *                       Select all files in current directory"
-  echo "  **                      Select all files recursively"
-  echo "  ..                      Go up to the parent directory"
-  echo "  /                       Return to repository root"
-  echo "  [empty]                  Press Enter with no input to finish selection and copy to clipboard"
-  echo "  l                       List currently selected files"
-  echo "  q                       Quit without generating output"
-  echo "  h                       Show help for commands"
-  echo ""
-  echo "FEATURES:"
-  echo "  - Works with git repositories only (respects .gitignore)"
-  echo "  - Excludes hidden files and directories (starting with .)"
-  echo "  - Interactive directory navigation with files and folders sorted by recency"
-  echo "  - Creates a structured output with file count, directory tree, and contents"
-  echo "  - Copies the formatted output to the clipboard"
-  echo ""
-  echo "EXAMPLES:"
-  echo "  $0 ~/my-project        # Start in specified repository"
-  echo "  $0                     # Start in current directory"
-  echo "  $0 ~/my-project -d     # Show debug output"
+  
+  echo "NAVIGATION TIPS:"
+  echo "  • Files and directories are sorted by modification time (most recent first)"
+  echo "  • Only git-tracked files are shown (respects .gitignore)"
+  echo "  • Hidden files and directories (starting with .) are excluded"
+  echo "  • The output will follow directory structure for better LLM understanding"
+  
+  if [[ "$interactive_mode" -eq 0 ]]; then
+    echo ""
+    echo "EXAMPLES:"
+    echo "  $(basename "$0") ~/my-project        # Start in specified repository"
+    echo "  $(basename "$0")                     # Start in current directory"
+    echo "  $(basename "$0") ~/my-project -d     # Show debug output"
+  else
+    echo ""
+    echo "-------------------------------------------------------------"
+    read -p "Press Enter to return to file selection..." 
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -118,7 +138,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -h|--help)
-      print_usage
+      show_help 0
       exit 0
       ;;
     *)
@@ -126,7 +146,7 @@ while [[ $# -gt 0 ]]; do
         REPO_PATH="$1"
       elif [[ $1 == -* ]]; then
         echo "Unknown option: $1"
-        print_usage
+        show_help 0
         exit 1
       else
         echo "Error: Directory not found: $1"
@@ -424,6 +444,7 @@ get_directory_contents() {
 echo "Starting interactive file selection..."
 SELECTED_FILES=()
 CURRENT_DIR="$GIT_ROOT"
+ERROR_MESSAGE=""
 
 ITEMS=()
 ITEM_TYPES=()
@@ -433,35 +454,6 @@ PREVIEWS=()
 build_file_cache
 build_dir_mod_time_cache
 
-display_help() {
-  tput clear
-  tput cup 0 0
-  
-  echo "Interactive Navigation Commands:"
-  echo "  [number]                - Select a file or enter directory"
-  echo "  [num1,num2,...]        - Select multiple files by comma-separated list"
-  echo "  [num1-num2]            - Select range of files (inclusive)"
-  echo "  *                      - Select all files in current directory"
-  echo "  **                     - Select all files in current directory and subdirectories"
-  echo "  ..                     - Go up to parent directory"
-  echo "  /                      - Return to repository root directory"
-  echo "  /path/to/dir           - Navigate directly to a specific directory"
-  echo "  /path/to/file.ext      - Select a specific file directly"
-  echo "  [empty]                - Press Enter with no input to finish selection and copy to clipboard"
-  echo "  l                      - List currently selected files"
-  echo "  q                      - Quit without processing"
-  echo "  h, ?                   - Show this help"
-  echo ""
-  echo "Navigation Tips:"
-  echo "  • Files and directories are sorted by modification time (most recent first)"
-  echo "  • Only git-tracked files are shown (respects .gitignore)"
-  echo "  • Hidden files and directories (starting with .) are excluded"
-  echo "  • The output will follow directory structure for better LLM understanding"
-  echo ""
-  echo "---------------------------------------------"
-  echo -n "Press Enter to return to file selection..."
-  read
-}
 
 show_files() {
   local current_dir="$1"
@@ -475,9 +467,19 @@ show_files() {
   tput clear
   tput cup 0 0
   
+  # Display error message if present
+  if [[ -n "$ERROR_MESSAGE" ]]; then
+    tput setaf 1  # Red text
+    tput bold
+    echo "ERROR: $ERROR_MESSAGE"
+    tput sgr0
+    echo "-------------------------------------------------------------"
+    ERROR_MESSAGE=""  # Clear the error after displaying
+  fi
+  
   echo "Directory: $current_dir"
   echo "Selected: ${#SELECTED_FILES[@]} files"
-  echo "---------------------------------------------"
+  echo "-------------------------------------------------------------"
   
   get_directory_contents "$current_dir"
   
@@ -519,15 +521,12 @@ show_files() {
     ((idx++))
   done
   
-  echo "---------------------------------------------"
-  echo "Commands:"
-  echo "  [..] up, [/] root, [/path] jump"
-  echo "  [l] list, [q] quit, [h] help"
-  echo "  [Enter] finish & copy to clipboard"
-  echo "---------------------------------------------"
+  echo "-------------------------------------------------------------"
+  echo "  [..] up, [r] repo root, [./path] navigate (tab works)"
+  echo "  [l] list, [q] quit, [h] help, [Enter] copy and finish"
+  echo "-------------------------------------------------------------"
   
-  echo -n "> "
-  read -e selection
+  read -e -p "> " selection
   
   cd "$saved_dir" || return 1
   
@@ -537,9 +536,9 @@ show_files() {
       return 1
       ;;
     "help"|"h"|"?")
-      display_help
+      show_help 1
       ;;
-    "list"|"l"|"ls")
+    "list"|"l")
       tput clear
       tput cup 0 0
       
@@ -553,7 +552,7 @@ show_files() {
       fi
       
       echo ""
-      echo "---------------------------------------------"
+      echo "-------------------------------------------------------------"
       echo -n "Press Enter to return to file selection..."
       read
       ;;
@@ -565,36 +564,12 @@ show_files() {
       if [[ "$CURRENT_DIR" != "$GIT_ROOT" ]]; then
         CURRENT_DIR="$(dirname "$CURRENT_DIR")"
       else
-        echo "Already at repository root"
+        ERROR_MESSAGE="Already at repository root"
       fi
       ;;
-    "/"*)
-      if [[ "$selection" == "/" ]]; then
-        CURRENT_DIR="$GIT_ROOT"
-        echo "Returned to repository root"
-      else
-        # Extract the path after the /
-        local requested_path="${selection:1}"
-        # Remove trailing slash if present
-        requested_path="${requested_path%/}"
-        local target_path="${GIT_ROOT}/${requested_path}"
-
-        # Check if it's a directory
-        if [[ -d "$target_path" ]]; then
-          CURRENT_DIR="$target_path"
-          echo "Navigated to: $requested_path"
-        # Check if it's a file
-        elif [[ -f "$target_path" ]]; then
-          if [[ ! " ${SELECTED_FILES[*]} " =~ " ${target_path} " ]]; then
-            SELECTED_FILES+=("$target_path")
-            echo "Selected: $requested_path"
-          else
-            echo "Already selected: $requested_path"
-          fi
-        else
-          echo "Path not found: $requested_path"
-        fi
-      fi
+    "r")
+      CURRENT_DIR="$GIT_ROOT"
+      echo "Returned to repository root"
       ;;
     "*")
       local count=0
@@ -670,10 +645,10 @@ show_files() {
           done
           echo "Selected $count files from range $start-$end"
         else
-          echo "Invalid range: $selection (valid indices are 0-$((idx-1)))"
+          ERROR_MESSAGE="Invalid range: $selection (valid indices are 0-$((idx-1)))"
         fi
       else
-        echo "Invalid range format: $selection"
+        ERROR_MESSAGE="Invalid range format: $selection"
       fi
       ;;
 
@@ -699,10 +674,10 @@ show_files() {
                 ((count++))
               fi
             elif [ "$type" == "d" ]; then
-              echo "Note: Cannot select directory #$num ($name) in a list - use individual selection to navigate"
+              ERROR_MESSAGE="Cannot select directory #$num ($name) in a list - use individual selection to navigate"
             fi
           else
-            echo "Skipping invalid selection: $num"
+            ERROR_MESSAGE="Skipping invalid selection: $num"
           fi
         done
         echo "Selected $count files from list $selection"
@@ -720,21 +695,53 @@ show_files() {
         elif [ "$type" == "f" ]; then
           local full_path="$CURRENT_DIR/$name"
           if [[ ! -f "$full_path" ]]; then
-            echo "Warning: File not found at path: $full_path"
+            ERROR_MESSAGE="File not found at path: $full_path"
           elif [[ " ${SELECTED_FILES[*]} " =~ " ${full_path} " ]]; then
-            echo "Already selected: $name"
+            ERROR_MESSAGE="Already selected: $name"
           else
             SELECTED_FILES+=("$full_path")
             echo "Selected: $name"
           fi
         fi
       else
-        echo "Invalid selection: $selection"
+        ERROR_MESSAGE="Invalid selection: $selection"
       fi
       ;;
 
     *)
-      echo "Invalid selection: $selection"
+      # Handle any input as a path
+      local target_path=""
+      
+      if [[ "$selection" == /* ]]; then
+        target_path="$selection"
+      elif [[ "$selection" == ~* ]]; then
+        target_path=$(eval echo "$selection")
+      else
+        # For relative paths, resolve properly to avoid path artifacts like "./"
+        local old_pwd=$(pwd)
+        cd "$CURRENT_DIR" >/dev/null || return
+        target_path=$(realpath -m "$selection" 2>/dev/null || echo "$CURRENT_DIR/$selection")
+        cd "$old_pwd" >/dev/null || return
+      fi
+      
+      # Remove trailing slash
+      target_path="${target_path%/}"
+      # Normalize path to remove unnecessary artifacts
+      target_path=$(echo "$target_path" | sed 's|/\./|/|g')
+      
+      if [[ -d "$target_path" ]]; then
+        CURRENT_DIR="$target_path"
+        echo "Navigated to: $target_path"
+      elif [[ -f "$target_path" ]]; then
+        if [[ ! " ${SELECTED_FILES[*]} " =~ " ${target_path} " ]]; then
+          SELECTED_FILES+=("$target_path")
+          echo "Selected: $target_path"
+        else
+          ERROR_MESSAGE="Already selected: $target_path"
+        fi
+      else
+        ERROR_MESSAGE="Invalid selection or path not found: $selection"
+      fi
       ;;
   esac
   
