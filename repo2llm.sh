@@ -121,9 +121,9 @@ show_help() {
   if [[ "$interactive_mode" -eq 0 ]]; then
     echo ""
     echo "EXAMPLES:"
-    echo "  $(basename "$0") ~/my-project        # Start in specified repository"
-    echo "  $(basename "$0")                     # Start in current directory"
-    echo "  $(basename "$0") ~/my-project -d     # Show debug output"
+    echo "  $(basename "$0") ~/my-project"
+    echo "  $(basename "$0")"
+    echo "  $(basename "$0") ~/my-project -d"
   else
     echo ""
     echo "-------------------------------------------------------------"
@@ -467,14 +467,13 @@ show_files() {
   tput clear
   tput cup 0 0
   
-  # Display error message if present
   if [[ -n "$ERROR_MESSAGE" ]]; then
-    tput setaf 1  # Red text
+    tput setaf 1
     tput bold
     echo "ERROR: $ERROR_MESSAGE"
     tput sgr0
     echo "-------------------------------------------------------------"
-    ERROR_MESSAGE=""  # Clear the error after displaying
+    ERROR_MESSAGE=""
   fi
   
   echo "Directory: $current_dir"
@@ -709,7 +708,6 @@ show_files() {
       ;;
 
     *)
-      # Handle any input as a path
       local target_path=""
       
       if [[ "$selection" == /* ]]; then
@@ -717,16 +715,13 @@ show_files() {
       elif [[ "$selection" == ~* ]]; then
         target_path=$(eval echo "$selection")
       else
-        # For relative paths, resolve properly to avoid path artifacts like "./"
         local old_pwd=$(pwd)
         cd "$CURRENT_DIR" >/dev/null || return
         target_path=$(realpath -m "$selection" 2>/dev/null || echo "$CURRENT_DIR/$selection")
         cd "$old_pwd" >/dev/null || return
       fi
       
-      # Remove trailing slash
       target_path="${target_path%/}"
-      # Normalize path to remove unnecessary artifacts
       target_path=$(echo "$target_path" | sed 's|/\./|/|g')
       
       if [[ -d "$target_path" ]]; then
