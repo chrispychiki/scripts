@@ -146,14 +146,18 @@ fi
 
 GIT_ROOT=$(git rev-parse --show-toplevel)
 
-TEMP_FILE=$(mktemp)
-LIST_FILE=$(mktemp)
-ORDER_FILE=$(mktemp)
-trap 'rm -f "$TEMP_FILE" "$LIST_FILE" "$ORDER_FILE"' EXIT
+RANDPID="$$"
+TIMESTAMP=$(date +%s)
+TEMPDIR="/tmp/repo2llm_${RANDPID}_${TIMESTAMP}"
+mkdir -p "$TEMPDIR"
 
-FILE_CACHE_FILE=$(mktemp)
-DIR_MOD_TIME_CACHE_FILE=$(mktemp)
-trap 'rm -f "$TEMP_FILE" "$LIST_FILE" "$ORDER_FILE" "$FILE_CACHE_FILE" "$DIR_MOD_TIME_CACHE_FILE" "$TEMP_FILE.split."* "$LIST_FILE.tmp" "$LIST_FILE.tmp2" "$LIST_FILE.tree" /tmp/tmp.*' EXIT
+TEMP_FILE="$TEMPDIR/output.txt"
+LIST_FILE="$TEMPDIR/list.txt"
+ORDER_FILE="$TEMPDIR/order.txt"
+FILE_CACHE_FILE="$TEMPDIR/file_cache.txt"
+DIR_MOD_TIME_CACHE_FILE="$TEMPDIR/dir_mod_cache.txt"
+
+trap 'rm -rf "$TEMPDIR"' EXIT INT TERM
 
 build_file_cache() {
   local stat_fmt="%Y"
@@ -176,12 +180,10 @@ build_file_cache() {
 
   > "$FILE_CACHE_FILE"
 
-  # Process files in batches using xargs for parallel processing
-  split -l 500 "$TEMP_FILE" "$TEMP_FILE.split."
+  split -l 500 "$TEMP_FILE" "${TEMPDIR}/split."
   
-  for split_file in "$TEMP_FILE.split."*; do
+  for split_file in "${TEMPDIR}/split."*; do
     if [[ -f "$split_file" ]]; then
-      # Use xargs to parallelize stat operations
       cat "$split_file" | xargs -I{} -P 16 bash -c '
         file="$1"
         git_root="$2"
@@ -192,9 +194,9 @@ build_file_cache() {
           exit 0
         fi
         
-        full_path="$git_root/$file"
+        full_path="${git_root}/${file}"
         if [[ -f "$full_path" && ! -d "$full_path" ]]; then
-          mod_time=$(stat $stat_opt "$stat_fmt" "$full_path" 2>/dev/null)
+          mod_time=$(stat "$stat_opt" "$stat_fmt" "$full_path" 2>/dev/null)
           if [[ -n "$mod_time" ]]; then
             echo "$file|$mod_time"
           fi
@@ -250,19 +252,19 @@ build_dir_mod_time_cache() {
 
 get_file_mod_time() {
   local file_path="$1"
-  grep "^$file_path|" "$FILE_CACHE_FILE" | cut -d'|' -f2
+  grep -F "^$(printf "%s" "$file_path")|" "$FILE_CACHE_FILE" | cut -d'|' -f2
 }
 
 get_dir_mod_time() {
   local dir_path="$1"
 
-  local cached_time=$(grep "^$dir_path|" "$DIR_MOD_TIME_CACHE_FILE" | cut -d'|' -f2)
+  local cached_time=$(grep -F "^$(printf "%s" "$dir_path")|" "$DIR_MOD_TIME_CACHE_FILE" | cut -d'|' -f2)
   if [[ -n "$cached_time" ]]; then
     echo "$cached_time"
     return
   fi
 
-  local max_time=$(awk -F'|' -v path="$dir_path/" '$1 ~ "^"path { if ($2 > max || max=="") max=$2 } END {print max}' "$FILE_CACHE_FILE")
+  local max_time=$(awk -F'|' -v path="$(printf "%s" "$dir_path")/" 'BEGIN { gsub(/[][^$.+*(){}|\\]/, "\\\\&", path) } $1 ~ "^"path { if ($2 > max || max=="") max=$2 } END {print max}' "$FILE_CACHE_FILE")
 
   if [[ -z "$max_time" ]]; then
     local stat_fmt="%Y"
@@ -271,7 +273,7 @@ get_dir_mod_time() {
       stat_fmt="%m"
       stat_opt="-f"
     fi
-    max_time=$(stat $stat_opt "$stat_fmt" "$GIT_ROOT/$dir_path" 2>/dev/null)
+    max_time=$(stat "$stat_opt" "$stat_fmt" "${GIT_ROOT}/${dir_path}" 2>/dev/null)
   fi
 
   echo "$dir_path|$max_time" >> "$DIR_MOD_TIME_CACHE_FILE"
@@ -294,8 +296,10 @@ get_all_items() {
     grep -E "^[^/]+\|" "$FILE_CACHE_FILE" |
       awk -F'|' '{print $2 "|f|" $1}' >> "$items_temp_file"
   else
-    grep -E "^$rel_path/[^/]+\|" "$FILE_CACHE_FILE" |
-      awk -F'|' -v path="$rel_path/" '{sub(path, "", $1); print $2 "|f|" $1}' >> "$items_temp_file"
+    local escaped_path
+    escaped_path=$(printf "%s" "$rel_path" | sed 's/[][\^$.*+?(){}|\\]/\\&/g')
+    grep -E "^${escaped_path}/[^/]+\|" "$FILE_CACHE_FILE" |
+      awk -F'|' -v path="$rel_path/" '{gsub(path, "", $1); print $2 "|f|" $1}' >> "$items_temp_file"
   fi
 
   local dir_list_file=$(mktemp)
@@ -303,9 +307,11 @@ get_all_items() {
   if [[ -z "$rel_path" ]]; then
     grep -E "/" "$FILE_CACHE_FILE" | cut -d'|' -f1 | cut -d'/' -f1 | grep -v "^\." | sort | uniq > "$dir_list_file"
   else
-    grep -E "^$rel_path/" "$FILE_CACHE_FILE" |
+    local escaped_path
+    escaped_path=$(printf "%s" "$rel_path" | sed 's/[][\^$.*+?(){}|\\]/\\&/g')
+    grep -E "^${escaped_path}/" "$FILE_CACHE_FILE" |
       awk -F'|' -v path="$rel_path/" '{
-        sub(path, "", $1);
+        gsub(path, "", $1);
         if (index($1, "/") > 0) {
           dir = substr($1, 1, index($1, "/")-1);
           if (dir != "." && dir !~ /^\./)
@@ -323,7 +329,7 @@ get_all_items() {
     if [[ -z "$rel_path" ]]; then
       dir_path_full="$dir"
     else
-      dir_path_full="$rel_path/$dir"
+      dir_path_full="${rel_path}/${dir}"
     fi
 
     local mod_time=$(get_dir_mod_time "$dir_path_full")
@@ -345,7 +351,7 @@ get_all_items() {
 get_directory_preview() {
   local dir_path="$1"
   local max_items="$2"
-  local full_path="$GIT_ROOT/$dir_path"
+  local full_path="${GIT_ROOT}/${dir_path}"
 
   local all_items=$(get_all_items "$full_path")
 
@@ -359,9 +365,9 @@ get_directory_preview() {
 
   while IFS='|' read -r time type name; do
     if [[ "$type" == "d" ]]; then
-      result+="📁 $name\n"
+      result+="📁 $name"$'\n'
     else
-      result+="📄 $name\n"
+      result+="📄 $name"$'\n'
     fi
 
     ((count++))
@@ -384,7 +390,7 @@ get_directory_contents() {
   PREVIEWS=()
   
   if [[ -n "$sorted_items" ]]; then
-    while read -r item; do
+    while IFS= read -r item; do
       if [[ -z "$item" ]]; then
         continue
       fi
@@ -405,12 +411,13 @@ get_directory_contents() {
           dir_path="${current_dir#$GIT_ROOT/}/${name%/}"
         fi
         
-        local preview=$(get_directory_preview "$dir_path" 3)
+        local preview
+        preview=$(get_directory_preview "$dir_path" 3)
         PREVIEWS+=("$preview")
       else
         PREVIEWS+=("")
       fi
-    done < <(echo "$sorted_items")
+    done < <(printf "%s\n" "$sorted_items")
   fi
 }
 
@@ -452,12 +459,16 @@ display_help() {
   echo "  • The output will follow directory structure for better LLM understanding"
   echo ""
   echo "---------------------------------------------"
-  read -p "Press Enter to return to file selection..." 
+  echo -n "Press Enter to return to file selection..."
+  read
 }
 
 show_files() {
   local current_dir="$1"
   local items_index=()
+  local saved_dir
+  
+  saved_dir=$(pwd)
   
   cd "$current_dir" || return
   
@@ -496,7 +507,7 @@ show_files() {
             echo "       $line"
           fi
           ((line_num++))
-        done < <(echo -e "$preview")
+        done < <(echo "$preview")
       fi
     else
       echo "[$idx] 📄 $item"
@@ -515,7 +526,10 @@ show_files() {
   echo "  [Enter] finish & copy to clipboard"
   echo "---------------------------------------------"
   
-  read -p "> " selection
+  echo -n "> "
+  read -e selection
+  
+  cd "$saved_dir" || return 1
   
   case "$selection" in
     ""|"done"|"d")
@@ -540,7 +554,8 @@ show_files() {
       
       echo ""
       echo "---------------------------------------------"
-      read -p "Press Enter to return to file selection..." 
+      echo -n "Press Enter to return to file selection..."
+      read
       ;;
     "quit"|"q"|"exit")
       echo "Exiting without processing files."
@@ -560,7 +575,9 @@ show_files() {
       else
         # Extract the path after the /
         local requested_path="${selection:1}"
-        local target_path="$GIT_ROOT/$requested_path"
+        # Remove trailing slash if present
+        requested_path="${requested_path%/}"
+        local target_path="${GIT_ROOT}/${requested_path}"
 
         # Check if it's a directory
         if [[ -d "$target_path" ]]; then
@@ -586,7 +603,7 @@ show_files() {
         local name="${ITEMS[$i]}"
 
         if [ "$type" == "f" ]; then
-          local full_path="$CURRENT_DIR/$name"
+          local full_path="${CURRENT_DIR}/${name}"
           if [[ ! -f "$full_path" ]]; then
             continue
           elif [[ " ${SELECTED_FILES[*]} " =~ " ${full_path} " ]]; then
@@ -607,18 +624,21 @@ show_files() {
       fi
 
       local count=0
+      
+      local escaped_path
+      escaped_path=$(printf "%s" "$rel_path" | sed 's/[][\^$.*+?(){}|\\]/\\&/g')
 
       while IFS= read -r line; do
         file_path=$(echo "$line" | cut -d'|' -f1)
         if [[ -z "$file_path" ]]; then continue; fi
 
-        full_path="$GIT_ROOT/$file_path"
+        full_path="${GIT_ROOT}/${file_path}"
 
         if [[ ! " ${SELECTED_FILES[*]} " =~ " $full_path " ]]; then
           SELECTED_FILES+=("$full_path")
           ((count++))
         fi
-      done < <(grep "^$rel_path" "$FILE_CACHE_FILE")
+      done < <(grep -E "^${escaped_path}" "$FILE_CACHE_FILE")
 
       echo "Selected $count files recursively from $CURRENT_DIR"
       ;;
@@ -637,7 +657,7 @@ show_files() {
             local name="${item#*:}"
 
             if [ "$type" == "f" ]; then
-              local full_path="$CURRENT_DIR/$name"
+              local full_path="${CURRENT_DIR}/${name}"
               if [[ ! -f "$full_path" ]]; then
                 continue
               elif [[ " ${SELECTED_FILES[*]} " =~ " ${full_path} " ]]; then
@@ -650,7 +670,7 @@ show_files() {
           done
           echo "Selected $count files from range $start-$end"
         else
-          echo "Invalid range: $selection"
+          echo "Invalid range: $selection (valid indices are 0-$((idx-1)))"
         fi
       else
         echo "Invalid range format: $selection"
@@ -752,15 +772,19 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
     echo "$REL_PATH" >> "$LIST_FILE"
   done
   
-  sort -V "$LIST_FILE" > "${LIST_FILE}.tree"
-  mv "${LIST_FILE}.tree" "$LIST_FILE"
+  sort -V "$LIST_FILE" > "${TEMPDIR}/list.tree.txt"
+  mv "${TEMPDIR}/list.tree.txt" "$LIST_FILE"
   
   cp "$LIST_FILE" "$ORDER_FILE"
   
   PREV_PARTS=()
   INDENT_CACHE=()
   for ((i=0; i<10; i++)); do
-    INDENT_CACHE[i]=$(printf '|   %.0s' $(seq 1 $i))
+    indentation=""
+    for ((j=0; j<i; j++)); do
+      indentation="${indentation}|   "
+    done
+    INDENT_CACHE[i]="$indentation"
   done
 
   get_indent() {
@@ -768,7 +792,11 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
     if [ "$depth" -lt 10 ]; then
       echo "${INDENT_CACHE[$depth]}"
     else
-      printf '|   %.0s' $(seq 1 $depth)
+      local indentation=""
+      for ((i=0; i<depth; i++)); do
+        indentation="${indentation}|   "
+      done
+      echo "$indentation"
     fi
   }
 
