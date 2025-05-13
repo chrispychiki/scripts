@@ -41,6 +41,8 @@
 #   **             Select all files recursively
 #   ..             Go up to the parent directory
 #   /              Return to repository root
+#   /path/to/dir   Navigate directly to a subdirectory
+#   /path/to/file  Select a specific file directly
 #   [empty]        Press Enter with no input to finish selection and copy to clipboard
 #   l              List currently selected files
 #   q              Quit without generating output
@@ -420,6 +422,8 @@ echo "  - Enter '1-5' to select a range of files (inclusive)"
 echo "  - Use '*' to select all files in current directory"
 echo "  - Use '**' to select all files recursively"
 echo "  - Use '/' to return to repository root"
+echo "  - Use '/path/to/dir' to navigate directly to a subdirectory"
+echo "  - Use '/path/to/file.ext' to select a specific file directly"
 SELECTED_FILES=()
 CURRENT_DIR="$GIT_ROOT"
 
@@ -482,7 +486,7 @@ show_files() {
   done
   
   echo "---------------------------------------------"
-  echo "Commands: [..] up, [/] root, [Enter] finish & copy, [l] list, [q] quit, [h] help"
+  echo "Commands: [..] up, [/path], [Enter] finish & copy, [l] list, [q] quit, [h] help"
   echo "---------------------------------------------"
   
   read -p "> " selection
@@ -501,6 +505,8 @@ show_files() {
       echo "  **                     - Select all files in current directory and subdirectories"
       echo "  ..                     - Go up to parent directory"
       echo "  /                      - Return to repository root directory"
+      echo "  /path/to/dir           - Navigate directly to a specific directory"
+      echo "  /path/to/file.ext      - Select a specific file directly"
       echo "  [empty]                - Press Enter with no input to finish selection and copy to clipboard"
       echo "  l                      - List currently selected files"
       echo "  q                      - Quit without processing"
@@ -529,9 +535,31 @@ show_files() {
         echo "Already at repository root"
       fi
       ;;
-    "/")
-      CURRENT_DIR="$GIT_ROOT"
-      echo "Returned to repository root"
+    "/"*)
+      if [[ "$selection" == "/" ]]; then
+        CURRENT_DIR="$GIT_ROOT"
+        echo "Returned to repository root"
+      else
+        # Extract the path after the /
+        local requested_path="${selection:1}"
+        local target_path="$GIT_ROOT/$requested_path"
+
+        # Check if it's a directory
+        if [[ -d "$target_path" ]]; then
+          CURRENT_DIR="$target_path"
+          echo "Navigated to: $requested_path"
+        # Check if it's a file
+        elif [[ -f "$target_path" ]]; then
+          if [[ ! " ${SELECTED_FILES[*]} " =~ " ${target_path} " ]]; then
+            SELECTED_FILES+=("$target_path")
+            echo "Selected: $requested_path"
+          else
+            echo "Already selected: $requested_path"
+          fi
+        else
+          echo "Path not found: $requested_path"
+        fi
+      fi
       ;;
     "*")
       local count=0
