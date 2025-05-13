@@ -415,15 +415,6 @@ get_directory_contents() {
 }
 
 echo "Starting interactive file selection..."
-echo "Quick Selection Guide:"
-echo "  - Enter number to select file or navigate into directory"
-echo "  - Enter '1,3,5' to select multiple files by index"
-echo "  - Enter '1-5' to select a range of files (inclusive)"
-echo "  - Use '*' to select all files in current directory"
-echo "  - Use '**' to select all files recursively"
-echo "  - Use '/' to return to repository root"
-echo "  - Use '/path/to/dir' to navigate directly to a subdirectory"
-echo "  - Use '/path/to/file.ext' to select a specific file directly"
 SELECTED_FILES=()
 CURRENT_DIR="$GIT_ROOT"
 
@@ -435,11 +426,43 @@ PREVIEWS=()
 build_file_cache
 build_dir_mod_time_cache
 
+display_help() {
+  tput clear
+  tput cup 0 0
+  
+  echo "Interactive Navigation Commands:"
+  echo "  [number]                - Select a file or enter directory"
+  echo "  [num1,num2,...]        - Select multiple files by comma-separated list"
+  echo "  [num1-num2]            - Select range of files (inclusive)"
+  echo "  *                      - Select all files in current directory"
+  echo "  **                     - Select all files in current directory and subdirectories"
+  echo "  ..                     - Go up to parent directory"
+  echo "  /                      - Return to repository root directory"
+  echo "  /path/to/dir           - Navigate directly to a specific directory"
+  echo "  /path/to/file.ext      - Select a specific file directly"
+  echo "  [empty]                - Press Enter with no input to finish selection and copy to clipboard"
+  echo "  l                      - List currently selected files"
+  echo "  q                      - Quit without processing"
+  echo "  h, ?                   - Show this help"
+  echo ""
+  echo "Navigation Tips:"
+  echo "  • Files and directories are sorted by modification time (most recent first)"
+  echo "  • Only git-tracked files are shown (respects .gitignore)"
+  echo "  • Hidden files and directories (starting with .) are excluded"
+  echo "  • The output will follow directory structure for better LLM understanding"
+  echo ""
+  echo "---------------------------------------------"
+  read -p "Press Enter to return to file selection..." 
+}
+
 show_files() {
   local current_dir="$1"
   local items_index=()
   
   cd "$current_dir" || return
+  
+  tput clear
+  tput cup 0 0
   
   echo "Directory: $current_dir"
   echo "Selected: ${#SELECTED_FILES[@]} files"
@@ -486,7 +509,10 @@ show_files() {
   done
   
   echo "---------------------------------------------"
-  echo "Commands: [..] up, [/path], [Enter] finish & copy, [l] list, [q] quit, [h] help"
+  echo "Commands:"
+  echo "  [..] up, [/] root, [/path] jump"
+  echo "  [l] list, [q] quit, [h] help"
+  echo "  [Enter] finish & copy to clipboard"
   echo "---------------------------------------------"
   
   read -p "> " selection
@@ -497,32 +523,24 @@ show_files() {
       return 1
       ;;
     "help"|"h"|"?")
-      echo "Interactive Navigation Commands:"
-      echo "  [number]                - Select a file or enter directory"
-      echo "  [num1,num2,...]        - Select multiple files by comma-separated list"
-      echo "  [num1-num2]            - Select range of files (inclusive)"
-      echo "  *                      - Select all files in current directory"
-      echo "  **                     - Select all files in current directory and subdirectories"
-      echo "  ..                     - Go up to parent directory"
-      echo "  /                      - Return to repository root directory"
-      echo "  /path/to/dir           - Navigate directly to a specific directory"
-      echo "  /path/to/file.ext      - Select a specific file directly"
-      echo "  [empty]                - Press Enter with no input to finish selection and copy to clipboard"
-      echo "  l                      - List currently selected files"
-      echo "  q                      - Quit without processing"
-      echo "  h, ?                   - Show this help"
-      echo ""
-      echo "Navigation Tips:"
-      echo "  • Files and directories are sorted by modification time (most recent first)"
-      echo "  • Only git-tracked files are shown (respects .gitignore)"
-      echo "  • Hidden files and directories (starting with .) are excluded"
-      echo "  • The output will follow directory structure for better LLM understanding"
+      display_help
       ;;
     "list"|"l"|"ls")
+      tput clear
+      tput cup 0 0
+      
       echo "Currently selected files:"
-      for ((j=0; j<${#SELECTED_FILES[@]}; j++)); do
-        echo "  ${SELECTED_FILES[$j]}"
-      done
+      if [ ${#SELECTED_FILES[@]} -eq 0 ]; then
+        echo "  (No files selected yet)"
+      else
+        for ((j=0; j<${#SELECTED_FILES[@]}; j++)); do
+          echo "  ${SELECTED_FILES[$j]}"
+        done
+      fi
+      
+      echo ""
+      echo "---------------------------------------------"
+      read -p "Press Enter to return to file selection..." 
       ;;
     "quit"|"q"|"exit")
       echo "Exiting without processing files."
