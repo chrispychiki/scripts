@@ -42,6 +42,8 @@
 #   ..              Go up to the parent directory
 #   r               Return to repository root
 #   path            Navigate to path (tab completion works)
+#   u [num|path]    Unselect a file by index number or path
+#   u *             Unselect all files
 #   [empty]         Press Enter with no input to finish selection and copy to clipboard
 #   d, done         Shortcut to finish selection and copy to clipboard
 #   l, list         List currently selected files
@@ -105,6 +107,8 @@ show_help() {
   echo "  ..              Go up to the parent directory"
   echo "  r               Return to repository root"
   echo "  path            Navigate to path (tab completion works)"
+  echo "  u [num|path]    Unselect a file by index number or path"
+  echo "  u *             Unselect all files"
   echo "  [empty]         Press Enter with no input to finish selection and copy to clipboard"
   echo "  d, done         Shortcut to finish selection and copy to clipboard"
   echo "  l, list         List currently selected files"
@@ -477,7 +481,23 @@ show_files() {
   fi
   
   echo "Directory: $current_dir"
-  echo "Selected: ${#SELECTED_FILES[@]} files"
+  
+  # Display selected files with their indices
+  if [ ${#SELECTED_FILES[@]} -gt 0 ]; then
+    echo "Selected files:"
+    local displayed=0
+    for ((j=0; j<${#SELECTED_FILES[@]} && j<3; j++)); do
+      echo "  [$j] $(basename "${SELECTED_FILES[$j]}")"
+      ((displayed++))
+    done
+    
+    if [ $displayed -lt ${#SELECTED_FILES[@]} ]; then
+      echo "  ... and $((${#SELECTED_FILES[@]} - displayed)) more (use 'l' to list all)"
+    fi
+  else
+    echo "Selected: 0 files"
+  fi
+  
   echo "-------------------------------------------------------------"
   
   get_directory_contents "$current_dir"
@@ -546,7 +566,7 @@ show_files() {
         echo "  (No files selected yet)"
       else
         for ((j=0; j<${#SELECTED_FILES[@]}; j++)); do
-          echo "  ${SELECTED_FILES[$j]}"
+          echo "  [$j] ${SELECTED_FILES[$j]}"
         done
       fi
       
@@ -569,6 +589,44 @@ show_files() {
     "r")
       CURRENT_DIR="$GIT_ROOT"
       echo "Returned to repository root"
+      ;;
+    u*)
+      local unselect_arg="${selection#u}"
+      unselect_arg="${unselect_arg# }"
+      
+      if [[ -z "$unselect_arg" ]]; then
+        ERROR_MESSAGE="Usage: u [number|path|*] - You must specify what to unselect"
+      elif [[ "$unselect_arg" == "*" ]]; then
+        local count=${#SELECTED_FILES[@]}
+        SELECTED_FILES=()
+        echo "Unselected all $count files"
+      elif [[ "$unselect_arg" =~ ^[0-9]+$ ]] && [ "$unselect_arg" -lt "${#SELECTED_FILES[@]}" ]; then
+        local removed_file="${SELECTED_FILES[$unselect_arg]}"
+        SELECTED_FILES=("${SELECTED_FILES[@]:0:$unselect_arg}" "${SELECTED_FILES[@]:$((unselect_arg+1))}")
+        echo "Unselected: $removed_file"
+      else
+        local removed=0
+        local full_path=""
+        
+        if [[ "$unselect_arg" == /* ]]; then
+          full_path="$unselect_arg"
+        else
+          full_path="$CURRENT_DIR/$unselect_arg"
+        fi
+        
+        for i in "${!SELECTED_FILES[@]}"; do
+          if [[ "${SELECTED_FILES[$i]}" == "$full_path" ]]; then
+            SELECTED_FILES=("${SELECTED_FILES[@]:0:$i}" "${SELECTED_FILES[@]:$((i+1))}")
+            removed=1
+            echo "Unselected: $full_path"
+            break
+          fi
+        done
+        
+        if [[ "$removed" -eq 0 ]]; then
+          ERROR_MESSAGE="No such file in selection: $unselect_arg"
+        fi
+      fi
       ;;
     "*")
       local count=0
