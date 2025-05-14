@@ -130,7 +130,7 @@ show_help() {
     echo "  $(basename "$0") ~/my-project -d"
   else
     echo ""
-    echo "-------------------------------------------------------------"
+    echo "-------------------------------------------------------------------------------"
     read -p "Press Enter to return to file selection..." 
   fi
 }
@@ -202,7 +202,6 @@ build_file_cache() {
     echo "DEBUG [build_file_cache]: Building file cache..." >&2
   fi
 
-  # Create the temporary file
   if ! git -C "$GIT_ROOT" ls-files | grep -v "^\." | grep -v "/\." > "$TEMP_FILE"; then
     echo "Error: Failed to get file list from git" >&2
     return 1
@@ -511,13 +510,12 @@ show_files() {
     tput bold
     echo "ERROR: $ERROR_MESSAGE"
     tput sgr0
-    echo "-------------------------------------------------------------"
+    echo "-------------------------------------------------------------------------------"
     ERROR_MESSAGE=""
   fi
   
   echo "Directory: $current_dir"
   
-  # Display selected files with their indices
   if [ ${#SELECTED_FILES[@]} -gt 0 ]; then
     echo "Selected files:"
     local displayed=0
@@ -533,7 +531,7 @@ show_files() {
     echo "Selected: 0 files"
   fi
   
-  echo "-------------------------------------------------------------"
+  echo "-------------------------------------------------------------------------------"
   
   get_directory_contents "$current_dir"
   
@@ -575,10 +573,12 @@ show_files() {
     ((idx++))
   done
   
-  echo "-------------------------------------------------------------"
-  echo "  [..] up, [r] repo root, [./path] navigate (tab works)"
-  echo "  [l] list, [q] quit, [h] help, [Enter] copy and finish"
-  echo "-------------------------------------------------------------"
+  echo "-------------------------------------------------------------------------------"
+  echo "  SELECT: [num] file/dir, [num1,num2] multiple, [num1-num2] range"
+  echo "  SELECT: [*] all in dir, [**] recursive, [u num/path/*] unselect"
+  echo "  NAVIGATE: [..] parent, [r] root, [path] go to path (tab works)"
+  echo "  ACTIONS: [Enter] done, [l] list selected, [q] quit, [h] help"
+  echo "-------------------------------------------------------------------------------"
   
   read -e -p "> " selection
   
@@ -606,7 +606,7 @@ show_files() {
       fi
       
       echo ""
-      echo "-------------------------------------------------------------"
+      echo "-------------------------------------------------------------------------------"
       echo -n "Press Enter to return to file selection..."
       read
       ;;
@@ -818,12 +818,12 @@ show_files() {
       fi
       
       target_path="${target_path%/}"
-      # Clean up path by removing /./
-      target_path=$(echo "$target_path" | sed 's|/\./|/|g')
+      target_path=$(echo "$target_path" | sed 's|/\./|/|g' | sed 's|/\.$||')
       
       if [[ -d "$target_path" ]]; then
-        CURRENT_DIR="$target_path"
-        echo "Navigated to: $target_path"
+        # Ensure we're using the fully resolved canonical path
+        CURRENT_DIR=$(cd "$target_path" && pwd)
+        echo "Navigated to: $CURRENT_DIR"
       elif [[ -f "$target_path" ]]; then
         if [[ ! " ${SELECTED_FILES[*]} " =~ " ${target_path} " ]]; then
           SELECTED_FILES+=("$target_path")
