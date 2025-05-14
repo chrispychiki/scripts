@@ -803,7 +803,10 @@ show_files() {
     *)
       local target_path=""
       
-      if [[ "$selection" == /* ]]; then
+      # Handle special case for "." or "./" exactly
+      if [[ "$selection" == "." || "$selection" == "./" ]]; then
+        target_path="$CURRENT_DIR"
+      elif [[ "$selection" == /* ]]; then
         target_path="$selection"
       elif [[ "$selection" == ~* ]]; then
         target_path=$(eval echo "$selection")
@@ -815,6 +818,7 @@ show_files() {
       fi
       
       target_path="${target_path%/}"
+      # Clean up path by removing /./
       target_path=$(echo "$target_path" | sed 's|/\./|/|g')
       
       if [[ -d "$target_path" ]]; then
