@@ -172,16 +172,23 @@ GIT_ROOT=$(git rev-parse --show-toplevel)
 
 RANDPID="$$"
 TIMESTAMP=$(date +%s)
-TEMPDIR="/tmp/repo2llm_${RANDPID}_${TIMESTAMP}"
+RANDOM_SUFFIX="$RANDOM$RANDOM"
+TEMPDIR="/tmp/repo2llm_${RANDPID}_${TIMESTAMP}_${RANDOM_SUFFIX}"
 mkdir -p "$TEMPDIR"
 
 TEMP_FILE="$TEMPDIR/output.txt"
 LIST_FILE="$TEMPDIR/list.txt"
-ORDER_FILE="$TEMPDIR/order.txt"
+ORDER_FILE="$TEMPDIR/order.txt" 
 FILE_CACHE_FILE="$TEMPDIR/file_cache.txt"
 DIR_MOD_TIME_CACHE_FILE="$TEMPDIR/dir_mod_cache.txt"
 
-trap 'rm -rf "$TEMPDIR"' EXIT INT TERM
+cleanup() {
+  local exit_code=$?
+  rm -rf "$TEMPDIR"
+  exit $exit_code
+}
+
+trap cleanup EXIT INT TERM
 
 build_file_cache() {
   local stat_fmt="%Y"
@@ -195,7 +202,12 @@ build_file_cache() {
     echo "DEBUG [build_file_cache]: Building file cache..." >&2
   fi
 
-  git -C "$GIT_ROOT" ls-files | grep -v "^\." | grep -v "/\." > "$TEMP_FILE"
+  # Create the temporary file
+  if ! git -C "$GIT_ROOT" ls-files | grep -v "^\." | grep -v "/\." > "$TEMP_FILE"; then
+    echo "Error: Failed to get file list from git" >&2
+    return 1
+  fi
+  
   local file_count=$(wc -l < "$TEMP_FILE")
 
   if [[ "$DEBUG_MODE" -eq 1 ]]; then
@@ -203,12 +215,20 @@ build_file_cache() {
   fi
 
   > "$FILE_CACHE_FILE"
+  if [ ! -f "$FILE_CACHE_FILE" ]; then
+    echo "Error: Failed to create file cache" >&2
+    return 1
+  fi
 
-  split -l 500 "$TEMP_FILE" "${TEMPDIR}/split."
+  local split_prefix="${TEMPDIR}/split.${RANDOM}${RANDOM}"
+  if ! split -l 500 "$TEMP_FILE" "$split_prefix"; then
+    echo "Error: Failed to split file list" >&2
+    return 1
+  fi
   
   for split_file in "${TEMPDIR}/split."*; do
     if [[ -f "$split_file" ]]; then
-      cat "$split_file" | xargs -I{} -P 16 bash -c '
+      if ! cat "$split_file" | xargs -I{} -P 16 bash -c '
         file="$1"
         git_root="$2"
         stat_opt="$3"
@@ -225,9 +245,11 @@ build_file_cache() {
             echo "$file|$mod_time"
           fi
         fi
-      ' -- {} "$GIT_ROOT" "$stat_opt" "$stat_fmt" >> "$FILE_CACHE_FILE"
+      ' -- {} "$GIT_ROOT" "$stat_opt" "$stat_fmt" >> "$FILE_CACHE_FILE"; then
+        echo "Warning: Error processing some files in ${split_file}" >&2
+      fi
       
-      rm "$split_file"
+      rm -f "$split_file"
     fi
   done
 
@@ -308,7 +330,13 @@ get_dir_mod_time() {
 get_all_items() {
   local current_dir="$1"
   local rel_path
-  local items_temp_file="${TEMPDIR}/items_temp_${RANDOM}.txt"
+  local random_id="${RANDOM}${RANDOM}_$$"
+  local items_temp_file="${TEMPDIR}/items_temp_${random_id}.txt"
+  > "$items_temp_file"
+  if [ ! -f "$items_temp_file" ]; then
+    echo "Error: Failed to create temporary file $items_temp_file" >&2
+    return 1
+  fi
 
   if [[ "$current_dir" == "$GIT_ROOT" ]]; then
     rel_path=""
@@ -326,7 +354,14 @@ get_all_items() {
       awk -F'|' -v path="$rel_path/" '{gsub(path, "", $1); print $2 "|f|" $1}' >> "$items_temp_file"
   fi
 
-  local dir_list_file="${TEMPDIR}/dir_list_${RANDOM}.txt"
+  local random_id2="${RANDOM}${RANDOM}_$$"
+  local dir_list_file="${TEMPDIR}/dir_list_${random_id2}.txt"
+  > "$dir_list_file"
+  if [ ! -f "$dir_list_file" ]; then
+    echo "Error: Failed to create temporary file $dir_list_file" >&2
+    rm -f "$items_temp_file"
+    return 1
+  fi
 
   if [[ -z "$rel_path" ]]; then
     grep -E "/" "$FILE_CACHE_FILE" | cut -d'|' -f1 | cut -d'/' -f1 | grep -v "^\." | sort | uniq > "$dir_list_file"
@@ -363,13 +398,13 @@ get_all_items() {
     fi
   done < "$dir_list_file"
 
-  rm "$dir_list_file"
+  rm -f "$dir_list_file" 2>/dev/null
 
   if [[ -s "$items_temp_file" ]]; then
-    sort -t'|' -k1,1nr "$items_temp_file"
+    sort -t'|' -k1,1nr "$items_temp_file" || echo "Error: sort failed" >&2
   fi
 
-  rm "$items_temp_file"
+  rm -f "$items_temp_file" "$dir_list_file" 2>/dev/null
 }
 
 get_directory_preview() {
@@ -832,9 +867,9 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
     echo "$REL_PATH" >> "$LIST_FILE"
   done
   
-  sort -V "$LIST_FILE" > "${TEMPDIR}/list.tree.txt"
-  mv "${TEMPDIR}/list.tree.txt" "$LIST_FILE"
-  
+  list_tree_temp="${TEMPDIR}/list.tree.${RANDOM}${RANDOM}.txt"
+  sort -V "$LIST_FILE" > "$list_tree_temp"
+  mv "$list_tree_temp" "$LIST_FILE"
   cp "$LIST_FILE" "$ORDER_FILE"
   
   PREV_PARTS=()
@@ -861,6 +896,10 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
   }
 
   while IFS= read -r FILE_PATH; do
+    if [[ -z "$FILE_PATH" ]]; then
+      continue
+    fi
+    
     if [[ "$FILE_PATH" != *"/"* ]]; then
       echo "+-- $FILE_PATH"
       continue
@@ -897,6 +936,10 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
   echo ""
   
   while IFS= read -r REL_PATH; do
+    if [[ -z "$REL_PATH" ]]; then
+      continue
+    fi
+    
     FILE="${GIT_ROOT}/${REL_PATH}"
     if [[ ! -f "$FILE" ]]; then
       echo "Error: File not found: $FILE" >&2
@@ -908,9 +951,12 @@ echo "Formatting ${#SELECTED_FILES[@]} files for LLM interaction..."
     echo -e "# FILE: $FILE"
     echo -e "########"
     echo -e "\n<file-contents>"
-    cat "$FILE"
+    if ! cat "$FILE"; then
+      echo "Error: Could not read file: $FILE" >&2
+      echo "[Content unavailable due to read error]"
+    fi
     
-    if [ -s "$FILE" ] && [ "$(tail -c1 "$FILE")" != "$(printf '\n')" ]; then
+    if [ -s "$FILE" ] && [ "$(tail -c1 "$FILE" 2>/dev/null)" != "$(printf '\n')" ]; then
       echo ""
     fi
     echo "</file-contents>"
